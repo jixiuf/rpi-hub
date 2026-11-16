@@ -13,6 +13,7 @@
 
 mod backends;
 mod commands;
+mod suggest;
 mod events;
 mod host;
 mod intent;
@@ -55,6 +56,24 @@ rpi_plugin_sdk::export_plugin!(|api| {
         }
     } else {
         host::log("rpi-hub: host has no command registrar; slash commands disabled");
+    }
+
+    // Argument suggestions for the TUI autocomplete pipeline: typing
+    // `/msg ap` narrows the candidate list to `apmprod@…` before Enter.
+    // One handler serves every instance-targeting command; skipped silently
+    // on hosts without the slot (older rpi).
+    if let Some(register_suggester) = api.register_argument_suggester {
+        for command in ["msg", "cmd", "ask", "use"] {
+            let rc = register_suggester(
+                rpi_plugin_sdk::StbStringRef::from_str(command),
+                suggest::suggest_arguments,
+                rpi_plugin_sdk::callbacks::free_string,
+                hub.bridge_ptr(),
+            );
+            if rc != 0 {
+                host::log(&format!("rpi-hub: argument suggester /{command} rejected"));
+            }
+        }
     }
 
     if let Some(register_event) = api.register_event_handler {

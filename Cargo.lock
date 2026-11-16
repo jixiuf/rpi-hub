@@ -319,8 +319,6 @@ dependencies = [
 [[package]]
 name = "rpi-plugin-sdk"
 version = "0.24.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02dd87a3df42505fcbe8c3f97091fae79d900f71e3f98370a597d545ae562e99"
 dependencies = [
  "serde_json",
 ]
