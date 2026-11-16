@@ -161,7 +161,7 @@ fn parse_and_validate(params: &str, hub: &Hub) -> Result<(PathBuf, bool), String
     Ok((resolved, is_image))
 }
 
-fn drive_send(_hub: &Arc<Hub>, path: PathBuf, is_image: bool) -> Result<String, String> {
+fn drive_send(hub: &Arc<Hub>, path: PathBuf, is_image: bool) -> Result<String, String> {
     host::log(&format!(
         "outbound: drive_send path={} is_image={}",
         path.display(),
