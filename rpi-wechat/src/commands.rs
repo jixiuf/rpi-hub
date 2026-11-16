@@ -101,7 +101,10 @@ fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String>
             status_hub.mark_stopped();
         })
         .map_err(|e| e.to_string())?;
-    hub.set_status(&format!("wechat ✓ {}", hub.name()));
+    hub.set_status(&format!(
+        "wechat ✓ {}",
+        credentials.user_id
+    ));
     Ok(())
 }
 

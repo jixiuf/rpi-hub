@@ -331,7 +331,7 @@ impl Hub {
     pub fn mark_stopped(&self) {
         self.running.store(false, Ordering::Release);
         *self.outbound.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        self.set_status("");
+        self.set_status("wechat ✗ 已停止");
     }
 
     /// Stop the bridge thread (bounded by the lifecycle finish budget).

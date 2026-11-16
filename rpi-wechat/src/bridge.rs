@@ -151,6 +151,14 @@ pub async fn run(
         if !held {
             return StopReason::LeaseLost;
         }
+        hub.set_status(&format!(
+            "wechat ✓ {} 轮询中",
+            hub.user_id
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+                .unwrap_or_default()
+        ));
 
         // ---- inbound: one long poll ----
         match ctx.client.get_updates(&cursor).await {
@@ -202,6 +210,7 @@ pub async fn run(
                     return StopReason::SessionExpired;
                 }
                 hub.record_error(format!("wechat: getupdates failed: {error}"));
+                hub.set_status(&format!("wechat ⚠ 网络异常（重试中）"));
                 tokio_time(backoff).await;
                 continue;
             }

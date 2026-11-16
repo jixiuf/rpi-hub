@@ -22,6 +22,9 @@ REMOTE_HOME="$("${SSH[@]}" 'printf %s "$HOME"')"
 REMOTE_SRC="$REMOTE_HOME/repos/rpi-hub"
 REMOTE_PI_RUST="$REMOTE_HOME/repos/pi-rust"
 
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
 echo "==> syncing rpi-hub source"
 rsync -az --exclude target --exclude .git --exclude .rpi \
   --exclude '.hub-pr' \
@@ -43,10 +46,18 @@ echo "==> installing into ~/.rpi/agent/extensions"
                    ~/.rpi/agent/extensions/"
 
 echo "==> restarting the relay session ($SESSION)"
-"${SSH[@]}" "tmux kill-session -t $SESSION 2>/dev/null || true; \
-  pkill -f 'session-dir /tmp/$SESSION' 2>/dev/null || true; sleep 1; \
-  tmux new-session -d -s $SESSION '/home/admin/.cargo/bin/rpi --session-dir /tmp/$SESSION'"
-sleep 6
+# The remote command goes through a script file (scp + sh) — inline quoting
+# through two shell layers silently dropped the tmux new-session call.
+cat >"$WORK/restart.sh" <<REMOTE
+#!/bin/sh
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+pkill -f "session-dir /tmp/$SESSION" 2>/dev/null || true
+sleep 1
+tmux new-session -d -s "$SESSION" "/home/admin/.cargo/bin/rpi --session-dir /tmp/$SESSION"
+REMOTE
+scp -q -o BatchMode=yes "$WORK/restart.sh" "$HOST:/tmp/$SESSION-restart.sh"
+"${SSH[@]}" "sh /tmp/$SESSION-restart.sh"
+sleep 8
 if "${SSH[@]}" "ss -tln | grep -q :8085"; then
   echo "OK: relay listening on :8085"
 else
