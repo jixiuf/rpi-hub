@@ -1,0 +1,16 @@
+[package]
+name = "rpi-hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "rpi multi-instance coordination: presence, messaging, delegation and channel leases"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rpi-plugin-sdk = { workspace = true }
+rpi-hub-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
