@@ -20,14 +20,9 @@ use std::time::Duration;
 
 use rpi_hub_core::now_ms;
 
-use crate::error::IlinkError;
 use crate::host::Hub;
 use crate::ilink::{self, IlinkClient};
 
-/// Lease parameters (mirrors the hub config defaults).
-const LEASE_TTL_MS: i64 = 20_000;
-/// Idle poll gap when the lease is not held.
-const LEASE_RETRY: Duration = Duration::from_secs(2);
 /// Backoff after a transport error.
 const TRANSPORT_BACKOFF: Duration = Duration::from_secs(5);
 /// Outbound chunk size: WeChat text messages past ~2k chars truncate
@@ -161,6 +156,7 @@ pub async fn run(
         match ctx.client.get_updates(&cursor).await {
             Ok(page) => {
                 cursor = page.cursor;
+                crate::state::save_cursor(&hub.dir, &cursor);
                 backoff = TRANSPORT_BACKOFF;
                 for raw in &page.msgs {
                     let Some(incoming) = ilink::normalize_msg(raw) else {
@@ -238,16 +234,6 @@ pub async fn run(
 /// helper keeps the await sites honest without dragging tokio into the crate.
 async fn tokio_time(duration: Duration) {
     std::thread::sleep(duration);
-}
-
-/// Split an assistant reply into WeChat-sized chunks and queue them.
-pub fn queue_reply(hub: &Arc<Hub>, outbound: &std::sync::mpsc::Sender<String>, text: &str) {
-    for chunk in chunk_reply(text) {
-        if outbound.send(chunk).is_err() {
-            hub.record_error("wechat: outbound queue closed");
-            break;
-        }
-    }
 }
 
 /// Store-level lease hand-off used by `/wechat stop`: release and stop.

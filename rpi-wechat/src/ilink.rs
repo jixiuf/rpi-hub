@@ -307,6 +307,8 @@ impl IlinkClient {
             .map(str::to_string))
     }
 
+    /// Media/typing milestone; wired in a later phase.
+    #[allow(dead_code)]
     pub async fn send_typing(
         &self,
         user_id: &str,
@@ -324,6 +326,9 @@ impl IlinkClient {
             .map(|_| ())
     }
 
+    /// Lifecycle notification used by the bridge spawn path (called from a
+    /// blocking context, not from `async fn`s in this file).
+    #[allow(dead_code)]
     pub async fn notify_lifecycle(&self, start: bool) -> Result<(), IlinkError> {
         let path = if start {
             "/ilink/bot/msg/notifystart"
@@ -463,34 +468,6 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
         });
     }
     out
-}
-
-/// Standard base64 decode (accepts padding; ignores whitespace).
-pub fn base64_decode_public(text: &str) -> Option<Vec<u8>> {
-    const INVALID: u8 = 255;
-    let mut table = [INVALID; 256];
-    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    for (index, &byte) in alphabet.iter().enumerate() {
-        table[byte as usize] = index as u8;
-    }
-    let mut out = Vec::with_capacity(text.len() / 4 * 3);
-    let mut buffer = 0u32;
-    let mut bits = 0u32;
-    for byte in text.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' => {
-                buffer = (buffer << 6) | table[byte as usize] as u32;
-                bits += 6;
-            }
-            b'=' | b'\r' | b'\n' | b' ' => continue,
-            _ => return None,
-        }
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buffer >> bits) as u8);
-        }
-    }
-    Some(out)
 }
 
 // ------------------------------------------------------------------- serde

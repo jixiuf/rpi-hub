@@ -119,6 +119,7 @@ fn tokio_lite() -> tokio::runtime::Runtime {
 
 extern "C" fn cmd_wechat(raw: StbStringRef, out: *mut StbString, _ud: *mut std::ffi::c_void) -> i32 {
     let args = args_of(raw);
+    host::log(&format!("cmd /wechat {args:?}"));
     let result = run_command(&args);
     match result {
         Ok(text) => emit(out, &text),
@@ -188,68 +189,102 @@ fn run_command(args: &str) -> Result<String, String> {
     }
 }
 
-/// QR login: fetch the code, save a PNG, poll until confirmed (120 s cap),
-/// persist credentials, and start the bridge.
+/// QR login: fetch the code and render it immediately (synchronous, fast);
+/// confirmation polling runs on a background thread and auto-starts the
+/// bridge, reporting the result as a transcript notice.
 fn login_flow(hub: &Arc<Hub>) -> Result<String, String> {
     let client = IlinkClient::new(crate::ilink::DEFAULT_BASE_URL, "")
         .map_err(|e| e.to_string())?;
     let login_runtime = tokio_lite();
-    let (qrcode, png_base64) = login_runtime
+    let (qrcode, login_url) = login_runtime
         .block_on(client.login_qrcode())
         .map_err(|e| e.to_string())?;
+    let qr_ascii = crate::qr::render_terminal(&login_url).map_err(|e| e.to_string())?;
 
-    // Save the QR as a PNG next to the state dir and open it with the system
-    // viewer (printing ASCII QR would wreck the TUI).
-    let dir = state::wechat_dir(&hub.dir);
-    rpi_hub_core::paths::ensure_private_dir(&dir).map_err(|e| e.to_string())?;
-    let png_path = dir.join("login-qr.png");
-    let bytes = crate::qr::decode_base64(&png_base64)
-        .ok_or("二维码内容不是合法 base64")?;
-    std::fs::write(&png_path, &bytes).map_err(|e| e.to_string())?;
-    let _ = std::process::Command::new("open")
-        .arg(&png_path)
-        .spawn();
-
-    let mut answer = format!(
-        "二维码已保存: {}\n（扫码后在微信里确认；等待确认中…最长 120 秒）",
-        png_path.display()
-    );
-    let deadline = now_ms() + 120_000;
-    loop {
-        if hub.shutdown.requested() || now_ms() >= deadline {
-            return Err("二维码超时未确认".into());
-        }
-        let status = login_runtime
-            .block_on(client.qrcode_status(&qrcode))
-            .map_err(|e| e.to_string())?;
-        match status.status.as_str() {
-            "confirmed" => {
-                let credentials = Credentials {
-                    token: status.bot_token.ok_or("confirmed 缺少 bot_token")?,
-                    base_url: status
-                        .base_url
-                        .unwrap_or_else(|| crate::ilink::DEFAULT_BASE_URL.to_string()),
-                    user_id: status.user_id.ok_or("confirmed 缺少 user_id")?,
-                    saved_at: now_ms(),
+    // Poll on a detached thread; on success persist credentials + start.
+    let thread_hub = Arc::clone(hub);
+    let thread_client = client.clone();
+    let thread_qrcode = qrcode.clone();
+    std::thread::Builder::new()
+        .name("rpi-wechat-login".into())
+        .spawn(move || {
+            let runtime = tokio_lite();
+            let deadline = std::time::Instant::now() + Duration::from_secs(180);
+            loop {
+                if thread_hub.shutdown.requested()
+                    || std::time::Instant::now() >= deadline
+                {
+                    let _ = thread_hub.notice("❌ 二维码超时未确认，重新 /wechat login");
+                    return;
+                }
+                let status = match runtime
+                    .block_on(thread_client.qrcode_status(&thread_qrcode))
+                {
+                    Ok(status) => status,
+                    Err(error) => {
+                        thread_hub.record_error(format!("wechat login poll: {error}"));
+                        std::thread::sleep(Duration::from_secs(2));
+                        continue;
+                    }
                 };
-                credentials.save(&hub.dir).map_err(|e| e.to_string())?;
-                spawn_bridge(hub, &credentials)?;
-                answer.push_str(&format!(
-                    "\n✓ 已绑定 user={} 并启动桥（{}）",
-                    credentials.user_id,
-                    hub.label()
-                ));
-                return Ok(answer);
+                match status.status.as_str() {
+                    "confirmed" => {
+                        let credentials = Credentials {
+                            token: match status.bot_token.clone() {
+                                Some(token) => token,
+                                None => {
+                                    thread_hub.record_error("wechat login: missing bot_token");
+                                    return;
+                                }
+                            },
+                            base_url: status
+                                .base_url
+                                .clone()
+                                .unwrap_or_else(|| crate::ilink::DEFAULT_BASE_URL.to_string()),
+                            user_id: match status.user_id.clone() {
+                                Some(user) => user,
+                                None => {
+                                    thread_hub.record_error("wechat login: missing user_id");
+                                    return;
+                                }
+                            },
+                            saved_at: now_ms(),
+                        };
+                        if let Err(error) = credentials.save(&thread_hub.dir) {
+                            thread_hub.record_error(format!("wechat login: save failed: {error}"));
+                            return;
+                        }
+                        match spawn_bridge(&thread_hub, &credentials) {
+                            Ok(()) => {
+                                let _ = thread_hub.notice(&format!(
+                                    "✓ 微信已绑定 user={}，桥已启动（{}）",
+                                    credentials.user_id,
+                                    thread_hub.label()
+                                ));
+                            }
+                            Err(error) => {
+                                let _ = thread_hub.notice(&format!(
+                                    "✓ 已绑定 user={}，但桥启动失败: {error}",
+                                    credentials.user_id
+                                ));
+                            }
+                        }
+                        return;
+                    }
+                    "expired" => {
+                        let _ = thread_hub.notice("❌ 二维码已过期，重新 /wechat login");
+                        return;
+                    }
+                    _ => std::thread::sleep(Duration::from_secs(2)),
+                }
             }
-            "expired" => return Err("二维码已过期，重新 /wechat login".into()),
-            _ => std::thread::sleep(Duration::from_secs(2)),
-        }
-    }
-}
+        })
+        .map_err(|e| e.to_string())?;
 
-// ---------------------------------------------------------------------------
-// Event handlers
-// ---------------------------------------------------------------------------
+    Ok(format!(
+        "请用微信扫码登录（或打开链接）：\n\n{qr_ascii}\n{login_url}\n\n（等待扫码确认，最长 180 秒；结果会以通知出现）"
+    ))
+}
 
 pub fn event_registry() -> Vec<(EventTag, EventHandlerFn)> {
     vec![
@@ -277,7 +312,7 @@ rpi_plugin_sdk::event_handler! {
     }
 }
 
-/// Assistant text closed this turn → queue chunks for the bridge thread.
+// Assistant text closed this turn -> queue chunks for the bridge thread.
 rpi_plugin_sdk::event_handler! {
     fn on_message_end(event, _user_data) {
         let Some(raw) = event.message_text() else {

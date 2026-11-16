@@ -17,10 +17,8 @@ uuid = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
 rand = "0.8"
-# Media milestone (Phase 3): AES-128-ECB file crypto.
-# aes = "0.8"
-# ecb = "0.1"
-# md-5 = "0.10"
+# QR rendering for /wechat login (terminal ASCII, like qrcode-terminal).
+qrcode = "0.14"
 
 [dev-dependencies]
 tempfile = { workspace = true }
