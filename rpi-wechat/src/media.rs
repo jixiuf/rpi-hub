@@ -23,6 +23,9 @@ type Aes128Ecb = ecb::Decryptor<aes::Aes128>;
 
 const MAX_DOWNLOAD_BYTES: u64 = 20 * 1024 * 1024;
 
+/// Fixed CDN base for media transfer (upload + download).
+pub const CDN_BASE: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
+
 /// AES-128-ECB decrypt with best-effort PKCS#7 unpadding.
 pub fn aes_decrypt_ecb(ciphertext: &[u8], key_hex: &str) -> Result<Vec<u8>, IlinkError> {
     let key = decode_hex_key(key_hex)?;
@@ -164,7 +167,8 @@ pub async fn download_file(
     aes_key_b64: Option<&str>,
 ) -> Result<Vec<u8>, IlinkError> {
     let url = format!(
-        "https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param={}",
+        "{}?encrypted_query_param={}",
+        crate::media::CDN_BASE,
         urlencode(encrypt_param)
     );
     let bytes = client.fetch_cdn(&url).await?;

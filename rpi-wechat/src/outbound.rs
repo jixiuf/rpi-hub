@@ -59,7 +59,7 @@ pub async fn send_file(
         digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
     };
     let media_type = if is_image { 2 } else { 3 };
-    let (cdn_base, upload_param) = client
+    let upload_param = client
         .get_upload_url(
             user_id,
             &file_key,
@@ -71,7 +71,7 @@ pub async fn send_file(
         )
         .await?;
     let download_param = client
-        .upload_to_cdn(&cdn_base, &upload_param, &file_key, &ciphertext)
+        .upload_to_cdn(&upload_param, &file_key, &ciphertext)
         .await?;
     let file_name = path
         .file_name()
@@ -158,7 +158,11 @@ fn parse_and_validate(params: &str, hub: &Hub) -> Result<(PathBuf, bool), String
 }
 
 fn drive_send(hub: &Arc<Hub>, path: PathBuf, is_image: bool) -> Result<String, String> {
-    // IlinkError maps to String at the boundary; see the async block below.
+    host::log(&format!(
+        "outbound: drive_send path={} is_image={}",
+        path.display(),
+        is_image
+    ));
     let Some(user_id) = hub
         .user_id
         .lock()
@@ -172,12 +176,18 @@ fn drive_send(hub: &Arc<Hub>, path: PathBuf, is_image: bool) -> Result<String, S
         &hub.credentials_token(),
     )
     .map_err(|e| e.to_string())?;
+    host::log("outbound: client built");
     let runtime = tokio_lite();
-    runtime.block_on(async move {
+    let result = runtime.block_on(async move {
         send_file(hub, &client, &user_id, &path, is_image)
             .await
             .map_err(|e| e.to_string())
-    })
+    });
+    host::log(&format!(
+        "outbound: send_file result={}",
+        result.as_ref().map(|n| n.as_str()).unwrap_or("ERR")
+    ));
+    result
 }
 
 fn tokio_lite() -> tokio::runtime::Runtime {

@@ -324,6 +324,7 @@ rpi_plugin_sdk::event_handler! {
             return 0;
         };
         if let Some(hub) = host::current() {
+            host::log(&format!("message_end: queueing reply ({} chars)", text.len()));
             hub.queue_reply(&text);
         }
         0

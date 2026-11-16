@@ -383,7 +383,10 @@ pub async fn run(
         }
 
         // ---- outbound: reply chunks queued by the event thread ----
+        let mut sent_count = 0;
         while let Ok(chunk) = ctx.outbound.try_recv() {
+            sent_count += 1;
+            host::log(&format!("outbound sending chunk {} ({} chars)", sent_count, chunk.len()));
             if let Err(error) = ctx
                 .client
                 .send_text(&ctx.user_id, &chunk, context_token.as_deref())
@@ -391,6 +394,9 @@ pub async fn run(
             {
                 hub.record_error(format!("wechat: send failed: {error}"));
             }
+        }
+        if sent_count > 0 {
+            host::log(&format!("outbound drained {} chunks", sent_count));
         }
 
         // ---- typing ticket refresh (cheap, every loop) ----

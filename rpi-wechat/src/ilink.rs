@@ -361,7 +361,9 @@ impl IlinkClient {
             .map(|_| ())
     }
 
-    /// `getuploadurl` for outbound media.
+    /// `getuploadurl` for outbound media. Returns (upload_param, file_key)
+    /// — the CDN base is fixed (`CDN_BASE`), the response carries either
+    /// `upload_param` directly or `upload_full_url` (param embedded in query).
     pub async fn get_upload_url(
         &self,
         to_user: &str,
@@ -371,7 +373,7 @@ impl IlinkClient {
         raw_md5: &str,
         encrypted_size: u64,
         aes_key_hex: &str,
-    ) -> Result<(String, String), IlinkError> {
+    ) -> Result<String, IlinkError> {
         let body = serde_json::json!({
             "filekey": file_key,
             "media_type": media_type,
@@ -386,32 +388,38 @@ impl IlinkClient {
         let value = self
             .post("/ilink/bot/getuploadurl", body, Duration::from_secs(20))
             .await?;
-        // Response shape: {cdn: {baseurl, upload_param}} — be lenient about
-        // nesting.
-        let cdn = value.get("cdn").unwrap_or(&value);
-        let base = cdn
-            .get("baseurl")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| IlinkError::Protocol("getuploadurl missing baseurl".into()))?
-            .to_string();
-        let param = cdn
-            .get("upload_param")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| IlinkError::Protocol("getuploadurl missing upload_param".into()))?
-            .to_string();
-        Ok((base, param))
+        if let Some(param) = value.get("upload_param").and_then(|v| v.as_str()) {
+            return Ok(param.to_string());
+        }
+        if let Some(full_url) = value.get("upload_full_url").and_then(|v| v.as_str()) {
+            // Extract encrypted_query_param from the full URL query.
+            if let Some(query) = full_url.split('?').nth(1) {
+                for pair in query.split('&') {
+                    if let Some(value) = pair.strip_prefix("encrypted_query_param=") {
+                        return Ok(percent_decode(value));
+                    }
+                }
+            }
+            return Err(IlinkError::Protocol(
+                "upload_full_url missing encrypted_query_param".into(),
+            ));
+        }
+        Err(IlinkError::Protocol(
+            "getuploadurl missing upload_param/upload_full_url".into(),
+        ))
     }
 
-    /// CDN upload: POST ciphertext, read `x-encrypted-param` back.
+    /// CDN upload: POST ciphertext to the fixed CDN base, read
+    /// `x-encrypted-param` back (the download param for sendmessage).
     pub async fn upload_to_cdn(
         &self,
-        cdn_base: &str,
         upload_param: &str,
         file_key: &str,
         ciphertext: &[u8],
     ) -> Result<String, IlinkError> {
         let url = format!(
-            "{cdn_base}/upload?encrypted_query_param={}&filekey={}",
+            "{}?encrypted_query_param={}&filekey={}",
+            crate::media::CDN_BASE,
             urlencode(upload_param),
             urlencode(file_key)
         );
@@ -646,6 +654,27 @@ pub struct FilePayload {
 
 /// Minimal percent-encoding for query values (the QR code token is hex-safe
 /// but be defensive).
+/// Percent-decode a query value.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(byte) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("zz"), 16)
+            {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
 fn urlencode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
