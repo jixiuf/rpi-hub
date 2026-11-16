@@ -82,6 +82,7 @@ pub trait HubStore: Send + Sync + std::fmt::Debug {
         capability: &str,
         to_node: &str,
         to_name: &str,
+        owner_epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<i64>;
@@ -159,10 +160,19 @@ impl HubStore for Store {
         capability: &str,
         to_node: &str,
         to_name: &str,
+        owner_epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<i64> {
-        Store::assign_lease(self, capability, to_node, to_name, now, ttl_ms)
+        Store::assign_lease(
+            self,
+            capability,
+            to_node,
+            to_name,
+            owner_epoch,
+            now,
+            ttl_ms,
+        )
     }
     fn release_lease(
         &self,
@@ -277,6 +287,7 @@ pub struct AssignParams {
     pub capability: String,
     pub to_node: String,
     pub to_name: String,
+    pub owner_epoch: String,
     pub now: i64,
     pub ttl_ms: i64,
 }

@@ -411,6 +411,8 @@ impl Hub {
     }
 
     /// Move the wechat lease to `target` — shared by `/use` and the selector.
+    /// `owner_epoch` is empty here: the target instance claims the lease with
+    /// its own epoch on its next lease tick (same owner_node → resume branch).
     pub fn switch_lease_to(&self, target: &InstanceView) -> Result<String, String> {
         let generation = self
             .store
@@ -418,6 +420,7 @@ impl Hub {
                 "wechat",
                 &target.node_id,
                 &target.name,
+                "",
                 now_ms(),
                 self.config.lease.ttl_ms(),
             )
@@ -475,7 +478,8 @@ impl Hub {
         let holder = self
             .store
             .lease_holder("wechat")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .filter(|h| h.expires_at > now);
         let mut lines = Vec::with_capacity(instances.len() + 2);
         lines.push("实例列表：".to_string());
         for (index, instance) in instances.iter().enumerate() {
@@ -516,8 +520,10 @@ impl Hub {
         }
         match holder {
             Some(holder) => lines.push(format!(
-                "微信接管: {}（generation {}）",
-                holder.owner_name, holder.generation
+                "微信接管: {}（generation {}，剩余 {}s）",
+                holder.owner_name,
+                holder.generation,
+                (holder.expires_at - now) / 1000
             )),
             None => lines.push("微信接管: (无)".to_string()),
         }

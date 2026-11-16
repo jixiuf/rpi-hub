@@ -220,6 +220,36 @@ impl Hub {
     }
 
     /// Claim the wechat lease (auto, when the plugin starts the bridge).
+    /// Register presence for the WeChat channel (role=channel). Name
+    /// collisions resolve to `-<pid>` exactly like the main hub row; the
+    /// resolved name is kept for claim-time consistency.
+    pub fn register_presence(&self, last_seen: i64) -> Result<String, String> {
+        let record = InstanceRecord {
+            node_id: format!("{}-wechat", self.node_id),
+            name: format!("{}-wechat", self.name()),
+            host: self.host.clone(),
+            pid: std::process::id(),
+            cwd: std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            role: "channel".into(),
+            epoch: self.epoch.clone(),
+            session_id: None,
+            title: Some("微信通道".into()),
+            model: None,
+            busy: false,
+            started_at: last_seen,
+            last_seen,
+        };
+        let registered = self
+            .store
+            .register_instance(&record, ALIVE_MS)
+            .map_err(|e| e.to_string())?;
+        self.set_name(registered.name.replace("-wechat", ""));
+        Ok(registered.name)
+    }
+
     /// Claim the wechat lease AND record it in `self.lease` — the bridge
     /// gate checks the recorded generation, so a claim without this bookkeeping
     /// is fenced out on its first tick (the LeaseLost-on-startup bug).
@@ -236,6 +266,40 @@ impl Hub {
                 self.config.lease.ttl_ms(),
             )
             .map_err(|e| e.to_string())?;
+        // Watcher takeover: if the lease is held by an instance that has died
+        // (its presence row is gone but the lease lingers until TTL), force a
+        // transfer so the unattended window is seconds, not the full TTL.
+        if let Claim::Held { holder } = &claim {
+            let owner_alive = self
+                .store
+                .get_instance(&holder.owner_node)
+                .map(|instance| instance.is_some())
+                .unwrap_or(false);
+            if !owner_alive {
+                let generation = self
+                    .store
+                    .assign_lease(
+                        "wechat",
+                        &self.node_id,
+                        &self.name(),
+                        &self.epoch,
+                        now,
+                        self.config.lease.ttl_ms(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                // Record the held lease BEFORE returning: the bridge's first
+                // renew_lease reads this state. Missing this made every
+                // watcher takeover die LeaseLost on its first tick.
+                *self.lease.lock().unwrap_or_else(|p| p.into_inner()) = Some(HeldLease {
+                    generation,
+                    expires_at: now + self.config.lease.ttl_ms(),
+                });
+                return Ok(Claim::Granted {
+                    generation,
+                    expires_at: now + self.config.lease.ttl_ms(),
+                });
+            }
+        }
         match &claim {
             Claim::Granted {
                 generation,

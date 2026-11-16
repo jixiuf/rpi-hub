@@ -272,6 +272,27 @@ pub async fn run(
                         context_token = Some(incoming.context_token.clone());
                         hub.set_context_token(Some(&incoming.context_token));
                     }
+                    // Re-check the lease BEFORE injecting: a /use hand-off may
+                    // have moved the lease while this poll was in flight (the
+                    // long poll cannot be interrupted mid-flight). Without
+                    // this the old instance would inject a message that
+                    // belongs to the new owner.
+                    let still_owner = {
+                        let generation = hub
+                            .lease
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .as_ref()
+                            .map(|l| l.generation)
+                            .unwrap_or(0);
+                        hub.store
+                            .check_lease("wechat", &hub.node_id, &hub.epoch, generation, now_ms())
+                            .unwrap_or(false)
+                    };
+                    if !still_owner {
+                        host::log("lease lost mid-poll; dropping message for the new owner");
+                        return StopReason::LeaseLost;
+                    }
                     match incoming.kind.as_str() {
                         "text" => {
                             let text = incoming.text.clone();
@@ -371,6 +392,10 @@ pub async fn run(
                                         size: bytes.len(),
                                         path: path.display().to_string(),
                                     });
+                                    let _ = hub.notice(&format!(
+                                        "📨 微信文件已接收: {}",
+                                        path.display()
+                                    ));
                                     let kb = (bytes.len() as f64 / 1024.0 * 10.0).round() / 10.0;
                                     let _ = ctx
                                         .client

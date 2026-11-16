@@ -208,7 +208,7 @@ fn transfer_bumps_the_generation_and_fences_the_previous_owner() {
         .claim_lease("wechat", "n1", "home", "e1", now, TTL)
         .unwrap();
     let generation = store
-        .transfer_lease("wechat", Some(("n1", "e1", 1)), "n2", "models", now + 1, TTL)
+        .transfer_lease("wechat", Some(("n1", "e1", 1)), "n2", "models", "e2", now + 1, TTL)
         .unwrap();
     assert_eq!(generation, 2);
     let holder = store.lease_holder("wechat").unwrap().unwrap();
@@ -218,7 +218,7 @@ fn transfer_bumps_the_generation_and_fences_the_previous_owner() {
 
     // A stale `from` guard is rejected rather than silently re-transferring.
     let error = store
-        .transfer_lease("wechat", Some(("n1", "e1", 1)), "n3", "other", now + 3, TTL)
+        .transfer_lease("wechat", Some(("n1", "e1", 1)), "n3", "other", "new-epoch", now + 3, TTL)
         .unwrap_err();
     assert!(error.to_string().contains("held by"));
 }
@@ -227,7 +227,7 @@ fn transfer_bumps_the_generation_and_fences_the_previous_owner() {
 fn transfer_requires_a_lease() {
     let (_dir, store) = file_store();
     let error = store
-        .transfer_lease("wechat", None, "n2", "models", 1, TTL)
+        .transfer_lease("wechat", None, "n2", "models", "new-epoch", 1, TTL)
         .unwrap_err();
     assert!(error.to_string().contains("claim it first"));
 }
@@ -274,7 +274,7 @@ fn assign_hands_a_lease_to_a_target_and_fences_the_old_owner() {
         .claim_lease("wechat", "n1", "home", "e1", now, TTL)
         .unwrap();
     let generation = store
-        .assign_lease("wechat", "n2", "models", now + 1, TTL)
+        .assign_lease("wechat", "n2", "models", "e-assign", now + 1, TTL)
         .unwrap();
     assert_eq!(generation, 2);
     assert!(!store.check_lease("wechat", "n1", "e1", 1, now + 2).unwrap());

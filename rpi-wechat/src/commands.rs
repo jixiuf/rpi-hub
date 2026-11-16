@@ -380,3 +380,55 @@ mod tests {
         assert!(assistant_text(r#"{"role":"user","content":"hi"}"#).is_none());
     }
 }
+
+
+/// A lightweight watcher: periodically checks the wechat lease and takes it
+/// over when it is unowned/expired/dead — so the channel is never left
+/// unattended after a remote instance dies (its lease expires in 20s).
+/// Skipped entirely when the user explicitly disabled the bridge.
+pub fn spawn_watcher(hub: &Arc<Hub>, credentials: Credentials) {
+    let thread_hub = Arc::clone(hub);
+    let dir = hub.dir.clone();
+    std::thread::Builder::new()
+        .name("rpi-wechat-watcher".into())
+        .spawn(move || {
+            loop {
+                if thread_hub.shutdown.requested()
+                    || state::is_disabled(&dir)
+                {
+                    return;
+                }
+                // Bridge already running in this process? Nothing to do.
+                if thread_hub.bridge_running() {
+                    std::thread::sleep(Duration::from_secs(3));
+                    continue;
+                }
+                // Try to claim: free / expired / dead-owner leases are granted.
+                let claim_result = thread_hub.claim_wechat();
+                if let Ok(rpi_hub_core::store::Claim::Held { holder }) = &claim_result {
+                    host::log(&format!(
+                        "watcher: wechat held by {} (gen {})",
+                        holder.owner_name, holder.generation
+                    ));
+                }
+                match claim_result {
+                    Ok(rpi_hub_core::store::Claim::Granted { .. }) => {
+                        host::log("watcher: lease free — taking over the channel");
+                        host::log("watcher: lease free — taking over the channel");
+                        if let Err(error) =
+                            spawn_bridge_public(&thread_hub, &credentials)
+                        {
+                            host::log(&format!(
+                                "watcher: bridge start failed: {error}"
+                            ));
+                        }
+                        // Bridge thread owns the lease renewal now.
+                        continue;
+                    }
+                    _ => {}
+                }
+                std::thread::sleep(Duration::from_secs(3));
+            }
+        })
+        .ok();
+}

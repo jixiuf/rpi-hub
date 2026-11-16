@@ -459,6 +459,7 @@ fn run_switch(params: &str) -> Result<String, String> {
             capability,
             &target.node_id,
             &target.name,
+            "",
             now_ms(),
             hub.config.lease.ttl_ms(),
         )

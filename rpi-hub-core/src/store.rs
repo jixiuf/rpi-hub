@@ -655,6 +655,7 @@ impl Store {
         from: Option<(&str, &str, i64)>,
         to_node: &str,
         to_name: &str,
+        _owner_epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<i64> {
@@ -681,10 +682,18 @@ impl Store {
         }
         let generation = generation + 1;
         tx.execute(
-            "UPDATE leases SET owner_node = ?2, owner_epoch = '', owner_name = ?3,
-                    generation = ?4, expires_at = ?5, updated_at = ?6
+            "UPDATE leases SET owner_node = ?2, owner_epoch = ?3, owner_name = ?4,
+                    generation = ?5, expires_at = ?6, updated_at = ?7
              WHERE capability = ?1",
-            params![capability, to_node, to_name, generation, now + ttl_ms, now],
+            params![
+                capability,
+                to_node,
+                owner_epoch,
+                to_name,
+                generation,
+                now + ttl_ms,
+                now
+            ],
         )?;
         tx.commit()?;
         Ok(generation)
@@ -701,10 +710,20 @@ impl Store {
         capability: &str,
         to_node: &str,
         to_name: &str,
+        owner_epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<i64> {
-        retry_busy(|| self.assign_lease_once(capability, to_node, to_name, now, ttl_ms))
+        retry_busy(|| {
+            self.assign_lease_once(
+                capability,
+                to_node,
+                to_name,
+                owner_epoch,
+                now,
+                ttl_ms,
+            )
+        })
     }
 
     fn assign_lease_once(
@@ -712,6 +731,7 @@ impl Store {
         capability: &str,
         to_node: &str,
         to_name: &str,
+        owner_epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<i64> {
@@ -727,7 +747,7 @@ impl Store {
         let generation = existing.map(|generation| generation + 1).unwrap_or(1);
         tx.execute(
             r#"INSERT INTO leases(capability, owner_node, owner_epoch, owner_name, generation, expires_at, updated_at)
-               VALUES (?1, ?2, '', ?3, ?4, ?5, ?6)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                ON CONFLICT(capability) DO UPDATE SET
                  owner_node = excluded.owner_node,
                  owner_epoch = excluded.owner_epoch,
@@ -735,7 +755,7 @@ impl Store {
                  generation = excluded.generation,
                  expires_at = excluded.expires_at,
                  updated_at = excluded.updated_at"#,
-            params![capability, to_node, to_name, generation, now + ttl_ms, now],
+            params![capability, to_node, owner_epoch, to_name, generation, now + ttl_ms, now],
         )?;
         tx.commit()?;
         Ok(generation)

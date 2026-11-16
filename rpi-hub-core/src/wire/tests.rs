@@ -160,7 +160,7 @@ fn a_second_node_is_fenced_by_the_relay_lease() {
     ));
     // Transfer through the same relay; the old owner's gate must fail.
     let generation = b
-        .assign_lease("wechat", "n2", "models", now + 1, TTL)
+        .assign_lease("wechat", "n2", "models", "e-x", now + 1, TTL)
         .unwrap();
     assert_eq!(generation, 2);
     assert!(!a.check_lease("wechat", "n1", "e1", 1, now + 2).unwrap());

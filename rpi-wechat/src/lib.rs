@@ -23,6 +23,8 @@ mod outbound;
 pub mod qr;
 mod state;
 
+use rpi_hub_core::now_ms;
+
 pub use error::IlinkError;
 pub use host::{current, Hub};
 pub use state::Credentials;
@@ -67,13 +69,24 @@ rpi_plugin_sdk::export_plugin!(|api| {
     }
     // Auto-start the bridge when credentials exist, the disabled flag is off,
     // and the wechat lease is free (claim is inside spawn_bridge).
+    // Register the channel presence row: makes the WeChat channel visible in
+    // /instances and keeps its claim-time name consistent with the registry
+    // (a name collision appends -<pid>, which claim_lease then reuses).
     let dir = hub.dir.clone();
+    let _ = hub.register_presence(now_ms());
     if !state::is_disabled(&dir) {
         if let Some(credentials) = state::Credentials::load(&dir) {
             match commands::spawn_bridge_public(&hub, &credentials) {
                 Ok(()) => host::log("bridge auto-started"),
-                Err(error) => host::log(&format!("bridge auto-start deferred: {error}")),
+                Err(error) => host::log(&format!(
+                    "bridge auto-start deferred: {error}; watcher will take over"
+                )),
             }
+            // Watcher: takes over the channel whenever it is unattended
+            // (remote instance died, lease expired) and this process is not
+            // already running a bridge. Skipped while the user has the
+            // bridge disabled.
+            commands::spawn_watcher(&hub, credentials);
         }
     }
     hub.install();
@@ -90,6 +103,10 @@ extern "C" fn lifecycle_finish(_user_data: *mut std::ffi::c_void) -> i32 {
     if let Some(hub) = host::current() {
         hub.request_shutdown();
         hub.stop_thread();
+        // Release the wechat lease on exit: otherwise it lingers for the TTL
+        // (20s) showing a dead instance as the channel owner in /instances,
+        // and a graceful exit should hand the channel over immediately.
+        bridge::release_and_stop(&hub);
         host::clear_current();
     }
     0

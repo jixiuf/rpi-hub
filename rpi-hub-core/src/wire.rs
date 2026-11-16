@@ -224,7 +224,14 @@ pub fn dispatch(store: &Store, method_name: &str, params: Value) -> std::result:
             let args = args!(api::AssignParams);
             serde_json::to_value(
                 store
-                    .assign_lease(&args.capability, &args.to_node, &args.to_name, args.now, args.ttl_ms)
+                    .assign_lease(
+                        &args.capability,
+                        &args.to_node,
+                        &args.to_name,
+                        &args.owner_epoch,
+                        args.now,
+                        args.ttl_ms,
+                    )
                     .map_err(|e| e.to_string())?,
             )
         }
@@ -1131,6 +1138,7 @@ impl HubStore for RemoteStore {
         capability: &str,
         to_node: &str,
         to_name: &str,
+        owner_epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<i64> {
@@ -1141,6 +1149,7 @@ impl HubStore for RemoteStore {
                 capability: capability.to_string(),
                 to_node: to_node.to_string(),
                 to_name: to_name.to_string(),
+                owner_epoch: owner_epoch.to_string(),
                 now,
                 ttl_ms,
             }
