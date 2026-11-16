@@ -15,6 +15,8 @@ pub enum IlinkError {
     },
     /// Unexpected response shape.
     Protocol(String),
+    /// Filesystem error (media persistence).
+    Io(String),
 }
 
 impl fmt::Display for IlinkError {
@@ -28,6 +30,7 @@ impl fmt::Display for IlinkError {
                 message,
             } => write!(f, "{label} HTTP {status} code={code:?}: {message}"),
             IlinkError::Protocol(m) => write!(f, "protocol: {m}"),
+            IlinkError::Io(m) => write!(f, "io: {m}"),
         }
     }
 }

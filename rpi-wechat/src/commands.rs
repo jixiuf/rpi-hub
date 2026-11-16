@@ -77,6 +77,7 @@ fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String>
 
     let client = IlinkClient::new(&credentials.base_url, &credentials.token)
         .map_err(|e| e.to_string())?;
+    hub.set_credentials(&credentials.base_url, &credentials.token);
     let (sender, receiver) = mpsc::channel::<String>();
     hub.set_outbound(sender);
     *hub.user_id.lock().unwrap_or_else(|p| p.into_inner()) =
@@ -93,18 +94,16 @@ fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String>
     std::thread::Builder::new()
         .name("rpi-wechat-bridge".into())
         .spawn(move || {
-            let runtime = tokio_lite();
+            let runtime = std::sync::Arc::new(tokio_lite());
+            let bridge_runtime = Arc::clone(&runtime);
             runtime.block_on(async move {
-                let reason = bridge::run(thread_hub, ctx).await;
+                let reason = bridge::run(thread_hub, ctx, Arc::clone(&bridge_runtime)).await;
                 host::log(&format!("bridge stopped: {reason:?}"));
             });
             status_hub.mark_stopped();
         })
         .map_err(|e| e.to_string())?;
-    hub.set_status(&format!(
-        "wechat ✓ {}",
-        credentials.user_id
-    ));
+    hub.set_status(&format!("wx ✓ {}", hub.name()));
     Ok(())
 }
 

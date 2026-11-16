@@ -117,6 +117,8 @@ pub struct Hub {
     outbound: Mutex<Option<std::sync::mpsc::Sender<String>>>,
     /// Whether the bridge thread is alive.
     running: AtomicBool,
+    /// Resolved at bind time; media tools read credentials via these getters.
+    credentials: Mutex<Option<(String, String)>>,
     /// The WeChat bridge may inject agent input / show notices.
     pub disabled: AtomicBool,
 }
@@ -160,6 +162,7 @@ impl Hub {
             shutdown: Shutdown::new(),
             lease: Mutex::new(None),
             user_id: Mutex::new(None),
+            credentials: Mutex::new(None),
             outbound: Mutex::new(None),
             running: AtomicBool::new(false),
             disabled: AtomicBool::new(false),
@@ -303,6 +306,36 @@ impl Hub {
         serde_json::from_str(&text).map_err(|e| format!("invalid action result: {e}"))
     }
 
+    /// Cache credentials for the outbound media tools.
+    pub fn set_credentials(&self, base_url: &str, token: &str) {
+        *self
+            .credentials
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some((base_url.to_string(), token.to_string()));
+    }
+
+    pub fn credentials_token(&self) -> String {
+        self.credentials
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|(_, token)| token.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn credentials_base_url(&self) -> String {
+        self.credentials
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|(base, _)| base.clone())
+            .unwrap_or_else(|| crate::ilink::DEFAULT_BASE_URL.to_string())
+    }
+
+    pub fn cwd(&self) -> PathBuf {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    }
+
     /// Hand the reply channel to the bridge thread.
     pub fn set_outbound(&self, sender: std::sync::mpsc::Sender<String>) {
         *self.outbound.lock().unwrap_or_else(|p| p.into_inner()) = Some(sender);
@@ -331,7 +364,7 @@ impl Hub {
     pub fn mark_stopped(&self) {
         self.running.store(false, Ordering::Release);
         *self.outbound.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        self.set_status("wechat ✗ 已停止");
+        self.set_status("wx ✗ 停止");
     }
 
     /// Stop the bridge thread (bounded by the lifecycle finish budget).

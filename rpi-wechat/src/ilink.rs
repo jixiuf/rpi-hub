@@ -326,6 +326,111 @@ impl IlinkClient {
             .map(|_| ())
     }
 
+    /// `getuploadurl` for outbound media.
+    pub async fn get_upload_url(
+        &self,
+        to_user: &str,
+        file_key: &str,
+        media_type: i64,
+        raw_size: u64,
+        raw_md5: &str,
+        encrypted_size: u64,
+        aes_key_hex: &str,
+    ) -> Result<(String, String), IlinkError> {
+        let body = serde_json::json!({
+            "filekey": file_key,
+            "media_type": media_type,
+            "to_user_id": to_user,
+            "rawsize": raw_size,
+            "rawfilemd5": raw_md5,
+            "filesize": encrypted_size,
+            "no_need_thumb": true,
+            "aeskey": aes_key_hex,
+            "base_info": Self::base_info(),
+        });
+        let value = self
+            .post("/ilink/bot/getuploadurl", body, Duration::from_secs(20))
+            .await?;
+        // Response shape: {cdn: {baseurl, upload_param}} — be lenient about
+        // nesting.
+        let cdn = value.get("cdn").unwrap_or(&value);
+        let base = cdn
+            .get("baseurl")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| IlinkError::Protocol("getuploadurl missing baseurl".into()))?
+            .to_string();
+        let param = cdn
+            .get("upload_param")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| IlinkError::Protocol("getuploadurl missing upload_param".into()))?
+            .to_string();
+        Ok((base, param))
+    }
+
+    /// CDN upload: POST ciphertext, read `x-encrypted-param` back.
+    pub async fn upload_to_cdn(
+        &self,
+        cdn_base: &str,
+        upload_param: &str,
+        file_key: &str,
+        ciphertext: &[u8],
+    ) -> Result<String, IlinkError> {
+        let url = format!(
+            "{cdn_base}/upload?encrypted_query_param={}&filekey={}",
+            urlencode(upload_param),
+            urlencode(file_key)
+        );
+        let response = self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/octet-stream")
+            .body(ciphertext.to_vec())
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+            .map_err(|e| IlinkError::Transport(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(IlinkError::Api {
+                label: "cdn upload".into(),
+                status: response.status().as_u16(),
+                code: None,
+                message: "upload failed".into(),
+            });
+        }
+        response
+            .headers()
+            .get("x-encrypted-param")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                IlinkError::Protocol("cdn upload missing x-encrypted-param".into())
+            })
+    }
+
+    /// `sendmessage` with arbitrary item list (media).
+    pub async fn send_media_message(
+        &self,
+        to_user: &str,
+        context_token: Option<&str>,
+        items: Value,
+    ) -> Result<(), IlinkError> {
+        let body = serde_json::json!({
+            "msg": {
+                "from_user_id": "",
+                "to_user_id": to_user,
+                "client_id": uuid::Uuid::new_v4().to_string(),
+                "message_type": 2,
+                "message_state": 2,
+                "context_token": context_token,
+                "item_list": items,
+            },
+            "base_info": Self::base_info(),
+        });
+        self.post("/ilink/bot/sendmessage", body, Duration::from_secs(15))
+            .await
+            .map(|_| ())
+    }
+
     /// Lifecycle notification used by the bridge spawn path (called from a
     /// blocking context, not from `async fn`s in this file).
     #[allow(dead_code)]
@@ -382,10 +487,11 @@ pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // First text item wins; image/file/voice items are surfaced by type only
-    // in this milestone.
+    // First text item wins; media items carry their download parameters.
     let mut text: Option<String> = None;
     let mut kind = "text".to_string();
+    let mut image: Option<ImagePayload> = None;
+    let mut file: Option<FilePayload> = None;
     if let Some(items) = raw.get("item_list").and_then(|v| v.as_array()) {
         for item in items {
             let item_type = item.get("type").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -399,9 +505,65 @@ pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
                             .map(str::to_string);
                     }
                 }
-                2 => kind = "image".to_string(),
+                2 => {
+                    if image.is_none() {
+                        kind = "image".to_string();
+                        let image_item = item.get("image_item");
+                        let url = image_item
+                            .and_then(|i| i.get("url"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .or_else(|| {
+                                image_item
+                                    .and_then(|i| i.get("media"))
+                                    .and_then(|m| m.get("full_url"))
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                            });
+                        let key = image_item
+                            .and_then(|i| i.get("aeskey"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .or_else(|| {
+                                image_item
+                                    .and_then(|i| i.get("media"))
+                                    .and_then(|m| m.get("aes_key"))
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                            });
+                        if let Some(url) = url {
+                            image = Some(ImagePayload { url, aes_key: key });
+                        }
+                    }
+                }
+                4 => {
+                    if file.is_none() {
+                        kind = "file".to_string();
+                        let file_item = item.get("file_item");
+                        let media = file_item.and_then(|f| f.get("media"));
+                        let param = media
+                            .and_then(|m| m.get("encrypt_query_param"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                        let key = media
+                            .and_then(|m| m.get("aes_key"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                        let name = file_item
+                            .and_then(|f| f.get("file_name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("file")
+                            .to_string();
+                        if let Some(param) = param {
+                            file = Some(FilePayload {
+                                encrypt_param: param,
+                                aes_key: key,
+                                file_name: name,
+                            });
+                        }
+                    }
+                }
                 3 => kind = "voice".to_string(),
-                4 => kind = "file".to_string(),
                 5 => kind = "video".to_string(),
                 _ => {}
             }
@@ -413,6 +575,8 @@ pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
         context_token,
         kind,
         text: text.unwrap_or_default(),
+        image,
+        file,
     })
 }
 
@@ -424,6 +588,25 @@ pub struct Incoming {
     pub context_token: String,
     pub kind: String,
     pub text: String,
+    /// Image: full-size download URL + hex key (from `image_item`).
+    pub image: Option<ImagePayload>,
+    /// File: CDN param + base64-wrapped key + original name.
+    pub file: Option<FilePayload>,
+}
+
+/// An image attachment ready for download.
+#[derive(Debug, Clone)]
+pub struct ImagePayload {
+    pub url: String,
+    pub aes_key: Option<String>,
+}
+
+/// A file attachment ready for download.
+#[derive(Debug, Clone)]
+pub struct FilePayload {
+    pub encrypt_param: String,
+    pub aes_key: Option<String>,
+    pub file_name: String,
 }
 
 // ---------------------------------------------------------------- encoding
@@ -445,7 +628,35 @@ fn urlencode(value: &str) -> String {
 
 /// Standard base64 (no line breaks). Kept local to avoid pulling the `base64`
 /// crate for one call site — the alphabet is stable.
-pub(crate) fn base64_encode(data: &[u8]) -> String {
+/// Standard base64 decode (accepts padding; ignores whitespace).
+pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    const INVALID: u8 = 255;
+    let mut table = [INVALID; 256];
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (index, &byte) in alphabet.iter().enumerate() {
+        table[byte as usize] = index as u8;
+    }
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' => {
+                buffer = (buffer << 6) | table[byte as usize] as u32;
+                bits += 6;
+            }
+            b'=' | b'\r' | b'\n' | b' ' => continue,
+            _ => return None,
+        }
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+pub fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {

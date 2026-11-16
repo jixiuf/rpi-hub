@@ -15,12 +15,14 @@
 //! the plugin epoch, and the stale epoch's writes are fenced by the store.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rpi_hub_core::now_ms;
 
 use crate::host::Hub;
+use crate::error::IlinkError;
 use crate::ilink::{self, IlinkClient};
 
 /// Backoff after a transport error.
@@ -124,7 +126,13 @@ pub fn authorized_and_new(
 pub async fn run(
     hub: Arc<Hub>,
     ctx: BridgeContext,
+    runtime: Arc<tokio::runtime::Runtime>,
 ) -> StopReason {
+    let media_dir = |hub: &Arc<Hub>| -> PathBuf {
+        let dir = crate::state::wechat_dir(&hub.dir).join("media");
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    };
     let mut cursor = ctx.cursor;
     let mut seen: HashSet<String> = HashSet::new();
     let mut backoff = TRANSPORT_BACKOFF;
@@ -136,29 +144,39 @@ pub async fn run(
             return StopReason::Shutdown;
         }
 
-        // ---- lease gate: nothing outbound happens without ownership ----
+        // ---- lease gate + renewal: nothing outbound happens without ownership.
+        // Renewal lives HERE (not on a side tick) so a running bridge keeps its
+        // lease alive; losing it stops the bridge within one poll.
         let now = now_ms();
-        let held = hub
-            .store
-            .check_lease(
-                "wechat",
-                &hub.node_id,
-                &hub.epoch,
-                hub.lease.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|l| l.generation).unwrap_or(0),
-                now,
-            )
-            .unwrap_or(false);
+        let ttl = hub.config.lease.ttl_ms();
+        let held = {
+            let mut lease_slot = hub.lease.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(lease) = lease_slot.as_mut() else {
+                return StopReason::LeaseLost;
+            };
+            let renewed = hub
+                .store
+                .renew_lease(
+                    "wechat",
+                    &hub.node_id,
+                    &hub.epoch,
+                    lease.generation,
+                    now,
+                    ttl,
+                )
+                .unwrap_or(false);
+            if renewed {
+                lease.expires_at = now + ttl;
+                true
+            } else {
+                false
+            }
+        };
         if !held {
+            hub.record_error("wechat: lease lost (fenced or expired)");
             return StopReason::LeaseLost;
         }
-        hub.set_status(&format!(
-            "wechat ✓ {} 轮询中",
-            hub.user_id
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone()
-                .unwrap_or_default()
-        ));
+        hub.set_status(&format!("wx ✓ {}", hub.name()));
 
         // ---- inbound: one long poll ----
         match ctx.client.get_updates(&cursor).await {
@@ -179,27 +197,134 @@ pub async fn run(
                     match incoming.kind.as_str() {
                         "text" => {
                             let text = incoming.text.clone();
+                            // Transcript marker: the injected user message
+                            // would otherwise read as a local prompt.
+                            let _ = hub.notice(&format!("📨 微信: {text}"));
                             if let Err(error) =
                                 hub.send_user_message(&text, Some("steer"))
                             {
-                                hub.record_error(format!("wechat: cannot inject message: {error}"));
-                                let _ = ctx.client.send_text(
-                                    &ctx.user_id,
-                                    &format!("⚠ 消息投递失败: {error}"),
-                                    context_token.as_deref(),
-                                );
+                                hub.record_error(format!(
+                                    "wechat: cannot inject message: {error}"
+                                ));
+                                let _ = ctx
+                                    .client
+                                    .send_text(
+                                        &ctx.user_id,
+                                        &format!("⚠ 消息投递失败: {error}"),
+                                        context_token.as_deref(),
+                                    )
+                                    .await;
                                 continue;
                             }
-                            let _ = ctx.client.send_text(
-                                &ctx.user_id,
-                                "（已接收，处理中…）",
-                                context_token.as_deref(),
-                            );
+                            let _ = ctx
+                                .client
+                                .send_text(
+                                    &ctx.user_id,
+                                    "（已接收，处理中…）",
+                                    context_token.as_deref(),
+                                )
+                                .await;
+                        }
+                        "image" => {
+                            let Some(payload) = incoming.image.clone() else {
+                                continue;
+                            };
+                            let download = ctx.client.clone();
+                            let url = payload.url.clone();
+                            let key = payload.aes_key.clone();
+                            let hub_for_media = Arc::clone(&hub);
+                            let result = runtime.block_on(async move {
+                                let (bytes, _media_type) =
+                                    crate::media::download_image(&url, key.as_deref()).await?;
+                                crate::media::save_to_disk(&media_dir(&hub_for_media), "image.jpg", &bytes)
+                            });
+                            match result {
+                                Ok(path) => {
+                                    let _ = hub.notice(&format!(
+                                        "📨 微信图片已保存: {}",
+                                        path.display()
+                                    ));
+                                    if let Err(error) = hub.send_user_message(
+                                        &format!(
+                                            "[微信图片已保存到 {}，可用 read 工具查看]",
+                                            path.display()
+                                        ),
+                                        Some("steer"),
+                                    ) {
+                                        hub.record_error(format!(
+                                            "wechat: inject image notice: {error}"
+                                        ));
+                                    }
+                                }
+                                Err(error) => {
+                                    hub.record_error(format!("wechat image: {error}"));
+                                    let _ = ctx
+                                        .client
+                                        .send_text(
+                                            &ctx.user_id,
+                                            "⚠ 图片下载失败",
+                                            context_token.as_deref(),
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+                        "file" => {
+                            let Some(payload) = incoming.file.clone() else {
+                                continue;
+                            };
+                            let download = ctx.client.clone();
+                            let param = payload.encrypt_param.clone();
+                            let key = payload.aes_key.clone();
+                            let name = payload.file_name.clone();
+                            let hub_for_media = Arc::clone(&hub);
+                            let file_name = name.clone();
+                            let result = runtime.block_on(async move {
+                                let bytes = crate::media::download_file(
+                                    &param,
+                                    key.as_deref(),
+                                )
+                                .await?;
+                                crate::media::save_to_disk(
+                                    &media_dir(&hub_for_media),
+                                    &file_name,
+                                    &bytes,
+                                )
+                            });
+                            match result {
+                                Ok(path) => {
+                                    let _ = hub.notice(&format!(
+                                        "📨 微信文件已保存: {}",
+                                        path.display()
+                                    ));
+                                    if let Err(error) = hub.send_user_message(
+                                        &format!(
+                                            "[微信文件已保存到 {}，文件名 {}]",
+                                            path.display(),
+                                            name
+                                        ),
+                                        Some("steer"),
+                                    ) {
+                                        hub.record_error(format!(
+                                            "wechat: inject file notice: {error}"
+                                        ));
+                                    }
+                                }
+                                Err(error) => {
+                                    hub.record_error(format!("wechat file: {error}"));
+                                    let _ = ctx
+                                        .client
+                                        .send_text(
+                                            &ctx.user_id,
+                                            "⚠ 文件下载失败",
+                                            context_token.as_deref(),
+                                        )
+                                        .await;
+                                }
+                            }
                         }
                         other => {
-                            let _ = hub.notice(&format!(
-                                "（微信收到{other}消息，本版本仅支持文字）"
-                            ));
+                            let _ = hub.notice(&format!("（微信收到{other}消息，暂不支持）"));
                         }
                     }
                 }
@@ -210,7 +335,7 @@ pub async fn run(
                     return StopReason::SessionExpired;
                 }
                 hub.record_error(format!("wechat: getupdates failed: {error}"));
-                hub.set_status(&format!("wechat ⚠ 网络异常（重试中）"));
+                hub.set_status("wx ⚠ 网络重试");
                 tokio_time(backoff).await;
                 continue;
             }
@@ -308,6 +433,8 @@ mod tests {
             context_token: String::new(),
             kind: "text".into(),
             text: "hi".into(),
+            image: None,
+            file: None,
         };
         let mut seen = HashSet::new();
         assert!(authorized_and_new(&msg, "u1", &mut seen));

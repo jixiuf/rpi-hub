@@ -18,6 +18,8 @@ mod commands;
 mod error;
 pub mod host;
 mod ilink;
+mod media;
+mod outbound;
 pub mod qr;
 mod state;
 
@@ -53,6 +55,10 @@ rpi_plugin_sdk::export_plugin!(|api| {
             }
         }
     }
+    if let Err(error) = outbound::register(&hub, &api) {
+        host::log(&format!("rpi-wechat: outbound tools not registered: {error}"));
+    }
+
     if let Some(register_event) = api.register_event_handler {
         for (tag, handler) in commands::event_registry() {
             let _ = register_event(tag, handler, hub.bridge_ptr());

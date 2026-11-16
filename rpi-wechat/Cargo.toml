@@ -19,6 +19,9 @@ tokio = { version = "1", features = ["rt", "time", "macros"] }
 rand = "0.8"
 # QR rendering for /wechat login (terminal ASCII, like qrcode-terminal).
 qrcode = "0.14"
+aes = "0.8"
+ecb = "0.1"
+md-5 = "0.10"
 
 [dev-dependencies]
 tempfile = { workspace = true }

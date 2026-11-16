@@ -167,7 +167,12 @@ impl Default for ChannelConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            auto_claim: true,
+            // The rpi-wechat plugin owns the wechat lease (claims on bridge
+            // start, renews on its own tick). The hub worker auto-claiming the
+            // same capability in the same process would swap the owner epoch
+            // and fence the bridge out within one tick — LeaseLost on every
+            // startup. Channels without a dedicated plugin can set this true.
+            auto_claim: false,
         }
     }
 }
