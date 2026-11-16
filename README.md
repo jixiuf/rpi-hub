@@ -44,6 +44,13 @@ rpi install --path ./rpi-hub
 rpi install --path ./rpi-wechat      # 微信通道（下一步）
 ```
 
+> rpi 0.23 的 `install --path` 在 cargo 1.100 下有兼容 bug（找不到 build 输出目录）。
+> 已在 pi-rust main 修复（7697ca8）。0.23 上手动安装：
+> ```bash
+> cargo build --release -p rpi-hub
+> cp target/release/librpi_hub.dylib ~/.rpi/agent/extensions/   # macos；linux 是 .so
+> ```
+
 ## 工具（给模型用）
 
 | 工具 | 作用 |
@@ -159,5 +166,15 @@ RELAY_PORT=8085 scripts/smoke-relay.sh HOST   # 真机跨机：relay(tmux, http:
 
 1. **rpi-wechat**：iLink 长轮询 + 回复管线，租约持有者才收发；`/use` 切换时旧实例停发并交接游标。
 2. 媒体（图片/文件）、`/sessions` `/goto`、`/start`（tmux 拉起实例）、隔离委派（目标机 `rpi -p` 子进程）。
+
+## 已部署（2026-11-16）
+
+| 机器 | 角色 | 状态 |
+| --- | --- | --- |
+| 本机 (ljmacjxf) | `office`，client → 10.170.16.16:8085 (http) | `~/.rpi/agent/extensions/librpi_hub.dylib` |
+| apmprod | `apmprod`，relay 监听 0.0.0.0:8085 (http) | `~/.rpi/agent/extensions/librpi_hub.so`；tmux 会话 `hub-relay` 常驻 relay |
+
+源码：本仓库（apmprod 上镜像在 `~/repos/rpi-hub`）。升级 = 两边 `git pull && cargo build --release`
+后覆盖对应 dylib/so，重启 rpi 生效（插件随会话加载）。
 
 见 `docs/architecture.md`、`docs/plugin-authoring.md`、`docs/reuse-survey.md`（rpi-package 里可复用的东西）。
