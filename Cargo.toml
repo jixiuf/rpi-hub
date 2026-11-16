@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["rpi-hub-core", "rpi-hub"]
+members = ["rpi-hub-core", "rpi-hub", "rpi-wechat"]
 
 [workspace.package]
 version = "0.1.0"
