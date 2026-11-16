@@ -139,16 +139,6 @@ fn editor_payload(title: String, initial: &str) -> Reply {
     }))
 }
 
-/// First render of a command: the TUI opens a selector; the user's pick (or a
-/// cancel) re-enters the same command with `action` set.
-fn emit_selector(out: *mut StbString, title: &str, items: &[serde_json::Value]) -> i32 {
-    let payload = serde_json::json!({ "kind": "selector", "title": title, "items": items });
-    unsafe {
-        *out = StbString::from_string(payload.to_string());
-    }
-    0
-}
-
 fn args_of(raw: StbStringRef) -> String {
     let text = unsafe { raw.as_str() }.to_string();
     serde_json::from_str::<serde_json::Value>(&text)
@@ -393,13 +383,15 @@ extern "C" fn cmd_hub(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
         let (sub, rest) = split_target(&args);
         match sub {
             "" | "status" => {
+                // Build fingerprint: proves which build a running session loaded.
+                const BUILD: &str = concat!(env!("CARGO_PKG_VERSION"), "@", env!("BUILD_STAMP"));
                 let stats = hub.store.stats(now_ms()).map_err(|e| e.to_string())?;
                 let holder = hub
                     .store
                     .lease_holder("wechat")
                     .map_err(|e| e.to_string())?;
                 Ok(format!(
-                    "实例: {}\n节点: {}\n模式: {:?}\n实例数: {}\n待投递: {}/{} 条\n微信接管: {}",
+                    "构建: {BUILD}\n实例: {}\n节点: {}\n模式: {:?}\n实例数: {}\n待投递: {}/{} 条\n微信接管: {}",
                     hub.label(),
                     hub.node_id,
                     hub.config.remote.mode,

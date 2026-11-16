@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "rpi multi-instance coordination: presence, messaging, delegation and channel leases"
+build = "build.rs"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
