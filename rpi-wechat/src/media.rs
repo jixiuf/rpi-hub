@@ -145,10 +145,11 @@ pub async fn fetch_cdn(url: &str) -> Result<Vec<u8>, IlinkError> {
 
 /// Download an image: `url` + optional hex `aeskey`.
 pub async fn download_image(
+    client: &crate::ilink::IlinkClient,
     url: &str,
     aes_key: Option<&str>,
 ) -> Result<(Vec<u8>, String), IlinkError> {
-    let bytes = fetch_cdn(url).await?;
+    let bytes = client.fetch_cdn(url).await?;
     let bytes = match aes_key {
         Some(key) => aes_decrypt_ecb(&bytes, &normalize_aes_key(key))?,
         None => bytes,
@@ -158,6 +159,7 @@ pub async fn download_image(
 
 /// Download a file: `encrypt_query_param` + base64-wrapped hex `aes_key`.
 pub async fn download_file(
+    client: &crate::ilink::IlinkClient,
     encrypt_param: &str,
     aes_key_b64: Option<&str>,
 ) -> Result<Vec<u8>, IlinkError> {
@@ -165,7 +167,7 @@ pub async fn download_file(
         "https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param={}",
         urlencode(encrypt_param)
     );
-    let bytes = fetch_cdn(&url).await?;
+    let bytes = client.fetch_cdn(&url).await?;
     match aes_key_b64 {
         Some(wrapped) => {
             let hex_key = crate::ilink::base64_decode(wrapped)

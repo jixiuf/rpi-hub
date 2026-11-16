@@ -239,13 +239,33 @@ pub async fn run(
                             let download = ctx.client.clone();
                             let url = payload.url.clone();
                             let key = payload.aes_key.clone();
-                            let hub_for_media = Arc::clone(&hub);
-                            let result = runtime.block_on(async move {
-                                let (bytes, _media_type) =
-                                    crate::media::download_image(&url, key.as_deref()).await?;
-                                crate::media::save_to_disk(&media_dir(&hub_for_media), "image.jpg", &bytes)
-                            });
-                            match result {
+                            let download_result = crate::media::download_image(
+                                &download,
+                                &url,
+                                key.as_deref(),
+                            )
+                            .await;
+                            let (bytes, _media_type) = match download_result {
+                                Ok(pair) => pair,
+                                Err(error) => {
+                                    hub.record_error(format!("wechat image: {error}"));
+                                    let _ = ctx
+                                        .client
+                                        .send_text(
+                                            &ctx.user_id,
+                                            "⚠ 图片下载失败",
+                                            context_token.as_deref(),
+                                        )
+                                        .await;
+                                    continue;
+                                }
+                            };
+                            let image_result = crate::media::save_to_disk(
+                                &media_dir(&hub),
+                                "image.jpg",
+                                &bytes,
+                            );
+                            match image_result {
                                 Ok(path) => {
                                     host::log(&format!("image saved: {}", path.display()));
                                     let _ = hub.notice(&format!(
@@ -286,21 +306,33 @@ pub async fn run(
                             let param = payload.encrypt_param.clone();
                             let key = payload.aes_key.clone();
                             let name = payload.file_name.clone();
-                            let hub_for_media = Arc::clone(&hub);
-                            let file_name = name.clone();
-                            let result = runtime.block_on(async move {
-                                let bytes = crate::media::download_file(
-                                    &param,
-                                    key.as_deref(),
-                                )
-                                .await?;
-                                crate::media::save_to_disk(
-                                    &media_dir(&hub_for_media),
-                                    &file_name,
-                                    &bytes,
-                                )
-                            });
-                            match result {
+                            let download_result = crate::media::download_file(
+                                &download,
+                                &param,
+                                key.as_deref(),
+                            )
+                            .await;
+                            let bytes = match download_result {
+                                Ok(bytes) => bytes,
+                                Err(error) => {
+                                    hub.record_error(format!("wechat file: {error}"));
+                                    let _ = ctx
+                                        .client
+                                        .send_text(
+                                            &ctx.user_id,
+                                            "⚠ 文件下载失败",
+                                            context_token.as_deref(),
+                                        )
+                                        .await;
+                                    continue;
+                                }
+                            };
+                            let file_result = crate::media::save_to_disk(
+                                &media_dir(&hub),
+                                &name,
+                                &bytes,
+                            );
+                            match file_result {
                                 Ok(path) => {
                                     let _ = hub.notice(&format!(
                                         "📨 微信文件已保存: {}",

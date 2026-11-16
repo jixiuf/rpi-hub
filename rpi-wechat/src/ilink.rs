@@ -23,6 +23,8 @@ use crate::error::IlinkError;
 pub const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
 const CHANNEL_VERSION: &str = "1.0.0";
 const CLIENT_VERSION_HEADER: &str = "iLink-App-ClientVersion";
+/// Bounded CDN payloads (a runaway download must not exhaust memory).
+const MAX_DOWNLOAD_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Transport + auth state for one bot session.
 #[derive(Clone)]
@@ -229,6 +231,39 @@ impl IlinkClient {
     }
 
     // ------------------------------------------------------------ messaging
+
+    /// GET a CDN URL with bounded size (media download).
+    pub async fn fetch_cdn(&self, url: &str) -> Result<Vec<u8>, IlinkError> {
+        let response = self
+            .http
+            .get(url)
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+            .map_err(|e| IlinkError::Transport(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(IlinkError::Api {
+                label: "cdn".into(),
+                status: response.status().as_u16(),
+                code: None,
+                message: "download failed".into(),
+            });
+        }
+        let length = response.content_length().unwrap_or(0);
+        if length > MAX_DOWNLOAD_BYTES {
+            return Err(IlinkError::Protocol(format!(
+                "cdn payload {length} exceeds {MAX_DOWNLOAD_BYTES}"
+            )));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| IlinkError::Transport(e.to_string()))?;
+        if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
+            return Err(IlinkError::Protocol("cdn payload exceeds limit".into()));
+        }
+        Ok(bytes.to_vec())
+    }
 
     /// `getupdates` — one long poll (up to 40 s server-side).
     pub async fn get_updates(&self, cursor: &str) -> Result<UpdatesPage, IlinkError> {
@@ -506,31 +541,29 @@ pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
                     }
                 }
                 2 => {
+                    // Reference implementation: URL comes from
+                    // image_item.media.full_url ONLY, and the key from
+                    // image_item.aeskey ONLY (hex). The other fields belong to
+                    // different message styles — mixing them yields the file
+                    // download endpoint and a wrong key.
+                    if std::env::var("RPI_HUB_DEBUG").ok().as_deref() == Some("1") {
+                        eprintln!(
+                            "[ilink] image_item={}",
+                            item.get("image_item").map(|v| v.to_string()).unwrap_or_default()
+                        );
+                    }
                     if image.is_none() {
                         kind = "image".to_string();
                         let image_item = item.get("image_item");
                         let url = image_item
-                            .and_then(|i| i.get("url"))
+                            .and_then(|i| i.get("media"))
+                            .and_then(|m| m.get("full_url"))
                             .and_then(|v| v.as_str())
-                            .map(str::to_string)
-                            .or_else(|| {
-                                image_item
-                                    .and_then(|i| i.get("media"))
-                                    .and_then(|m| m.get("full_url"))
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string)
-                            });
+                            .map(str::to_string);
                         let key = image_item
                             .and_then(|i| i.get("aeskey"))
                             .and_then(|v| v.as_str())
-                            .map(str::to_string)
-                            .or_else(|| {
-                                image_item
-                                    .and_then(|i| i.get("media"))
-                                    .and_then(|m| m.get("aes_key"))
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string)
-                            });
+                            .map(str::to_string);
                         if let Some(url) = url {
                             image = Some(ImagePayload { url, aes_key: key });
                         }
