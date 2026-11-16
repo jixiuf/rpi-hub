@@ -149,8 +149,11 @@ extern "C" fn cmd_cmd(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
         if target.node_id == hub.node_id {
             return intent::execute(&hub, &intent);
         }
-        let envelope =
-            Envelope::command(&hub.node_id, &hub.name(), &target.node_id, intent, now_ms());
+        // 带 correlation：目标执行完会把结果作为 Reply 投回本实例，worker
+        // 收到后以通知形式展示（否则结果只会出现在目标自己的会话里）。
+        let correlation = rpi_hub_core::protocol::new_id();
+        let envelope = Envelope::command(&hub.node_id, &hub.name(), &target.node_id, intent, now_ms())
+            .with_correlation(&correlation);
         hub.deliver(envelope)?;
         Ok(format!(
             "已发送给 {}；结果会以通知形式返回",
@@ -172,8 +175,12 @@ extern "C" fn cmd_ask(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
             return Err("用法: /ask <实例> <任务>".to_string());
         }
         let target = hub.resolve_target(target)?;
+        // correlation 让目标实例在回合结束时把结果投回本实例（否则结果只会
+        // 出现在目标自己的会话里）。
+        let correlation = rpi_hub_core::protocol::new_id();
         let envelope = Envelope::text(&hub.node_id, &hub.name(), &target.node_id, task, now_ms())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .with_correlation(&correlation);
         hub.deliver(envelope)?;
         Ok(format!(
             "任务已交给 {}；结果会以通知形式返回",
