@@ -117,35 +117,6 @@ fn unpad_pkcs7(mut data: Vec<u8>) -> Vec<u8> {
     data
 }
 
-/// GET a CDN URL with bounded size.
-pub async fn fetch_cdn(url: &str) -> Result<Vec<u8>, IlinkError> {
-    let response = reqwest::get(url)
-        .await
-        .map_err(|e| IlinkError::Transport(e.to_string()))?;
-    if !response.status().is_success() {
-        return Err(IlinkError::Api {
-            label: "cdn".into(),
-            status: response.status().as_u16(),
-            code: None,
-            message: "download failed".into(),
-        });
-    }
-    let length = response.content_length().unwrap_or(0);
-    if length > MAX_DOWNLOAD_BYTES {
-        return Err(IlinkError::Protocol(format!(
-            "cdn payload {length} exceeds {MAX_DOWNLOAD_BYTES}"
-        )));
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| IlinkError::Transport(e.to_string()))?;
-    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
-        return Err(IlinkError::Protocol("cdn payload exceeds limit".into()));
-    }
-    Ok(bytes.to_vec())
-}
-
 /// Download an image: `url` + optional hex `aeskey`.
 pub async fn download_image(
     client: &crate::ilink::IlinkClient,

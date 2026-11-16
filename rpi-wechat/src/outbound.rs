@@ -16,11 +16,6 @@ use crate::host;
 use crate::host::Hub;
 use crate::media;
 
-/// WeChat item type for images.
-const IMAGE_ITEM_TYPE: i64 = 1;
-/// WeChat item type for files.
-const FILE_ITEM_TYPE: i64 = 3;
-
 pub struct OutboundDrive {
     /// Path resolved from the tool call (absolute, sanitized).
     path: String,
@@ -82,29 +77,34 @@ pub async fn send_file(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".into());
 
+    // item_list types: image=2, file=4 (different namespace from
+    // getuploadurl's media_type). media.aes_key is base64(hex-key-utf8), and
+    // file len is the RAW (unencrypted) size - per the reference impl.
+    let encoded_aes_key = crate::ilink::base64_encode(key_hex.as_bytes());
+    let raw_size = bytes.len().to_string();
     let item = if is_image {
         serde_json::json!({
-            "type": IMAGE_ITEM_TYPE,
+            "type": 2,
             "image_item": {
                 "media": {
                     "encrypt_query_param": download_param,
-                    "aes_key": key_hex,
+                    "aes_key": encoded_aes_key,
                     "encrypt_type": 1,
                 },
-                "mid_size": bytes.len().to_string(),
+                "mid_size": raw_size,
             }
         })
     } else {
         serde_json::json!({
-            "type": FILE_ITEM_TYPE,
+            "type": 4,
             "file_item": {
                 "media": {
                     "encrypt_query_param": download_param,
-                    "aes_key": key_hex,
+                    "aes_key": encoded_aes_key,
                     "encrypt_type": 1,
                 },
                 "file_name": file_name,
-                "len": bytes.len().to_string(),
+                "len": raw_size,
             }
         })
     };
