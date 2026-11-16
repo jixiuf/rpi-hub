@@ -13,6 +13,7 @@ use md5::{Digest, Md5};
 
 use crate::error::IlinkError;
 use crate::host;
+use crate::state;
 use crate::host::Hub;
 use crate::media;
 
@@ -167,17 +168,14 @@ fn drive_send(hub: &Arc<Hub>, path: PathBuf, is_image: bool) -> Result<String, S
         path.display(),
         is_image
     ));
-    let Some(user_id) = hub
-        .user_id
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone()
-    else {
-        return Err("微信未登录".into());
+    // Credentials come from the persisted file, not process state: the tool
+    // must work from ANY instance (the lease only gates the polling bridge).
+    let Some(credentials) = state::Credentials::load(&hub.dir) else {
+        return Err("微信未登录（先 /wechat login）".into());
     };
-    let client =
-        crate::ilink::IlinkClient::new(&hub.credentials_base_url(), &hub.credentials_token())
-            .map_err(|e| e.to_string())?;
+    let user_id = credentials.user_id.clone();
+    let client = crate::ilink::IlinkClient::new(&credentials.base_url, &credentials.token)
+        .map_err(|e| e.to_string())?;
     host::log("outbound: client built");
     let runtime = tokio_lite();
     let result = runtime.block_on(async move {
