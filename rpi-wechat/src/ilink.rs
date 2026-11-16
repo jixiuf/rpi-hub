@@ -573,34 +573,6 @@ pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
                     }
                 }
                 4 => {
-                    {
-                        // eprintln 只到 TUI stderr；同时写文件日志便于远程诊断。
-                        let dump = item
-                            .get("file_item")
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
-                        eprintln!("[ilink] file_item={dump}");
-                        // 写入 wechat.log（与 host::log 相同路径），ilink.rs
-                        // 不依赖 host 模块以避免循环依赖。
-                        if let Ok(dir) = rpi_hub_core::paths::hub_dir() {
-                            let log_dir = rpi_hub_core::paths::log_dir(&dir);
-                            let _ = std::fs::create_dir_all(&log_dir);
-                            let path = log_dir.join("wechat.log");
-                            use std::io::Write;
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(&path)
-                            {
-                                let _ = writeln!(
-                                    f,
-                                    "{} [{}] [ilink] file_item={dump}",
-                                    rpi_hub_core::now_ms(),
-                                    std::process::id()
-                                );
-                            }
-                        }
-                    }
                     if file.is_none() {
                         kind = "file".to_string();
                         let file_item = item.get("file_item");
