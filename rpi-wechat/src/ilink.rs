@@ -413,7 +413,7 @@ impl IlinkClient {
         ciphertext: &[u8],
     ) -> Result<String, IlinkError> {
         let url = format!(
-            "{}?encrypted_query_param={}&filekey={}",
+            "{}/upload?encrypted_query_param={}&filekey={}",
             crate::media::CDN_BASE,
             urlencode(upload_param),
             urlencode(file_key)

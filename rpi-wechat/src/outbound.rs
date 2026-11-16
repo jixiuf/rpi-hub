@@ -60,7 +60,9 @@ pub async fn send_file(
             .map(|b| format!("{b:02x}"))
             .collect::<String>()
     };
-    let media_type = if is_image { 2 } else { 3 };
+    // getuploadurl media_type: 1=IMG, 2=VID, 3=FILE (see types.ts). The
+    // sendmessage item_list type differs (image=2, file=3) - do not confuse.
+    let media_type = if is_image { 1 } else { 3 };
     let upload_param = client
         .get_upload_url(
             user_id,
