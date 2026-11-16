@@ -164,19 +164,18 @@ RELAY_PORT=8085 scripts/smoke-relay.sh HOST   # 真机跨机：relay(tmux, http:
 
 `smoke-relay.sh` 在无法 ssh 到目标机时自动 skip；已实测 apmprod:8085（防火墙可直连的端口）。
 
-## 下一步
+## 状态
 
-1. **rpi-wechat**：iLink 长轮询 + 回复管线，租约持有者才收发；`/use` 切换时旧实例停发并交接游标。
-2. 媒体（图片/文件）、`/sessions` `/goto`、`/start`（tmux 拉起实例）、隔离委派（目标机 `rpi -p` 子进程）。
+- ✅ 多实例协调（presence / 信箱 / 租约 fencing）
+- ✅ 跨机 relay（TCP+token，可选 HTTP 前门模式）
+- ✅ rpi-wechat 文字通道（QR 登录、收发、分块回复、租约门控）
+- ✅ TUI 参数建议（`register_argument_suggester`，pi-rust PR #338 待合并）
+- ⬜ 媒体收发（代码已有：`media.rs` + `send_image/file_to_wechat` 工具；待真机验证）
+- ⬜ `/sessions` `/goto`、`/start`（tmux 拉起实例）、隔离委派
 
-## 已部署（2026-11-16）
-
-| 机器 | 角色 | 状态 |
-| --- | --- | --- |
-| 本机 (ljmacjxf) | `office`，client → 10.170.16.16:8085 (http) | `~/.rpi/agent/extensions/librpi_hub.dylib` |
-| apmprod | `apmprod`，relay 监听 0.0.0.0:8085 (http) | `~/.rpi/agent/extensions/librpi_hub.so`；tmux 会话 `hub-relay` 常驻 relay |
-
-源码：本仓库（apmprod 上镜像在 `~/repos/rpi-hub`）。升级 = 两边 `git pull && cargo build --release`
-后覆盖对应 dylib/so，重启 rpi 生效（插件随会话加载）。
+> 部署注意：`Cargo.toml` 中 `rpi-plugin-sdk` 目前指向本地 pi-rust 路径
+> （argument-suggester 槽位在 PR #338 中，crates.io 尚未发版）。PR 合并发版后
+> 改回 `rpi-plugin-sdk = "0.25"` 即可正常构建。跨机部署见
+> `scripts/deploy-apmprod.sh`（会重写远端的 SDK path）。
 
 见 `docs/architecture.md`、`docs/plugin-authoring.md`、`docs/reuse-survey.md`（rpi-package 里可复用的东西）。
