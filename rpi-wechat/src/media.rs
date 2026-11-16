@@ -1,6 +1,10 @@
 //! Media transfer for iLink: CDN download + AES-128-ECB decrypt, and the
 //! inverse (encrypt + getuploadurl + CDN PUT) for outbound images/files.
 //!
+//! Note: `outbound.rs` keeps its own copy of the low-level helpers (a
+//! deliberate split so the tool driver does not depend on this module's
+//! private state); `#![allow(dead_code)]` silences the duplicate warnings.
+//!
 //! Key conventions (mirroring the reference implementation):
 //! - inbound images: `image_item.aeskey` is **hex** (32 chars);
 //!   `image_item.media.aes_key` is **base64** — ECB, no padding removal
@@ -21,7 +25,10 @@ use crate::error::IlinkError;
 
 type Aes128Ecb = ecb::Decryptor<aes::Aes128>;
 
-const MAX_DOWNLOAD_BYTES: u64 = 20 * 1024 * 1024;
+#[allow(dead_code)]
+mod _doc_note {}
+
+// moved to ilink.rs (fetch_cdn is a method on IlinkClient)
 
 /// Fixed CDN base for media transfer (upload + download).
 pub const CDN_BASE: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
@@ -47,6 +54,7 @@ pub fn aes_decrypt_ecb(ciphertext: &[u8], key_hex: &str) -> Result<Vec<u8>, Ilin
 }
 
 /// AES-128-ECB encrypt with PKCS#7 padding.
+#[allow(dead_code)]
 pub fn aes_encrypt_ecb(plaintext: &[u8], key_hex: &str) -> Result<Vec<u8>, IlinkError> {
     type Aes128EcbEnc = ecb::Encryptor<aes::Aes128>;
     if plaintext.is_empty() {
@@ -134,15 +142,12 @@ pub async fn download_image(
 /// Download a file: `encrypt_query_param` + base64-wrapped hex `aes_key`.
 pub async fn download_file(
     client: &crate::ilink::IlinkClient,
-    encrypt_param: &str,
+    full_url: &str,
     aes_key_b64: Option<&str>,
 ) -> Result<Vec<u8>, IlinkError> {
-    let url = format!(
-        "{}?encrypted_query_param={}",
-        crate::media::CDN_BASE,
-        urlencode(encrypt_param)
-    );
-    let bytes = client.fetch_cdn(&url).await?;
+    // Use the full_url from file_item AS-IS: encrypt_query_param is already
+    // URL-encoded, and re-encoding it (% → %25) breaks the CDN (HTTP 400).
+    let bytes = client.fetch_cdn(full_url).await?;
     match aes_key_b64 {
         Some(wrapped) => {
             let hex_key = crate::ilink::base64_decode(wrapped)

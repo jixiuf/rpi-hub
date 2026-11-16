@@ -573,6 +573,34 @@ pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
                     }
                 }
                 4 => {
+                    {
+                        // eprintln 只到 TUI stderr；同时写文件日志便于远程诊断。
+                        let dump = item
+                            .get("file_item")
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        eprintln!("[ilink] file_item={dump}");
+                        // 写入 wechat.log（与 host::log 相同路径），ilink.rs
+                        // 不依赖 host 模块以避免循环依赖。
+                        if let Ok(dir) = rpi_hub_core::paths::hub_dir() {
+                            let log_dir = rpi_hub_core::paths::log_dir(&dir);
+                            let _ = std::fs::create_dir_all(&log_dir);
+                            let path = log_dir.join("wechat.log");
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&path)
+                            {
+                                let _ = writeln!(
+                                    f,
+                                    "{} [{}] [ilink] file_item={dump}",
+                                    rpi_hub_core::now_ms(),
+                                    std::process::id()
+                                );
+                            }
+                        }
+                    }
                     if file.is_none() {
                         kind = "file".to_string();
                         let file_item = item.get("file_item");
@@ -581,6 +609,24 @@ pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
                             .and_then(|m| m.get("encrypt_query_param"))
                             .and_then(|v| v.as_str())
                             .map(str::to_string);
+                        let full_url = file_item
+                            .and_then(|f| f.get("media"))
+                            .and_then(|m| m.get("full_url"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                // Fallback: build from param (already encoded).
+                                media
+                                    .and_then(|m| m.get("encrypt_query_param"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|p| {
+                                        format!(
+                                            "{}?encrypted_query_param={p}",
+                                            crate::media::CDN_BASE
+                                        )
+                                    })
+                                    .unwrap_or_default()
+                            });
                         let key = media
                             .and_then(|m| m.get("aes_key"))
                             .and_then(|v| v.as_str())
@@ -590,13 +636,12 @@ pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
                             .and_then(|v| v.as_str())
                             .unwrap_or("file")
                             .to_string();
-                        if let Some(param) = param {
-                            file = Some(FilePayload {
-                                encrypt_param: param,
-                                aes_key: key,
-                                file_name: name,
-                            });
-                        }
+                        file = Some(FilePayload {
+                            encrypt_param: param.unwrap_or_default(),
+                            full_url,
+                            aes_key: key,
+                            file_name: name,
+                        });
                     }
                 }
                 3 => kind = "voice".to_string(),
@@ -637,10 +682,12 @@ pub struct ImagePayload {
     pub aes_key: Option<String>,
 }
 
-/// A file attachment ready for download.
+/// A file attachment ready for download. `full_url` is used as-is (the
+/// embed ped_query_param is already URL-encoded — re-encoding breaks the CDN).
 #[derive(Debug, Clone)]
 pub struct FilePayload {
     pub encrypt_param: String,
+    pub full_url: String,
     pub aes_key: Option<String>,
     pub file_name: String,
 }

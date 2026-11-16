@@ -261,6 +261,42 @@ impl Hub {
             .map(|_| ())
     }
 
+    /// Send a content-blocks user message (text + inline images) into the
+    /// agent lane — the WeChat media path. `images` are base64 JPEG/PNG
+    /// payloads; the host deserializes them into image content blocks the
+    /// model can see.
+    pub fn send_user_content(
+        &self,
+        text: &str,
+        images: &[crate::bridge::ImageData],
+        deliver_as: Option<&str>,
+    ) -> Result<(), String> {
+        let mut content = vec![serde_json::json!({
+            "type": "text",
+            "text": text,
+        })];
+        for image in images {
+            content.push(serde_json::json!({
+                "type": "image",
+                "data": image.data,
+                "mimeType": image.media_type,
+            }));
+        }
+        let mut args = serde_json::json!({
+            "message": {
+                "kind": "user",
+                "role": "user",
+                "content": content,
+                "timestamp": now_ms(),
+            },
+            "triggerTurn": true,
+        });
+        if let Some(deliver_as) = deliver_as {
+            args["deliverAs"] = serde_json::json!(deliver_as);
+        }
+        self.action(RuntimeActionId::SendMessage, args).map(|_| ())
+    }
+
     /// Show text in the transcript without running the model.
     pub fn notice(&self, text: &str) -> Result<(), String> {
         self.action(
@@ -317,8 +353,7 @@ impl Hub {
 
     /// Refresh the shared context token (called on every authorized inbound).
     pub fn set_context_token(&self, token: Option<&str>) {
-        *self.context_token.lock().unwrap_or_else(|p| p.into_inner()) =
-            token.map(str::to_string);
+        *self.context_token.lock().unwrap_or_else(|p| p.into_inner()) = token.map(str::to_string);
     }
 
     pub fn context_token(&self) -> Option<String> {
