@@ -38,6 +38,117 @@ fn emit_error(out: *mut StbString, error: impl std::fmt::Display) -> i32 {
     emit(out, &format!("❌ {error}"))
 }
 
+/// A command result that is either plain text (wrapped as a message) or an
+/// already-shaped UI payload (selector/editor) written verbatim.
+enum Reply {
+    Text(String),
+    Ui(serde_json::Value),
+}
+
+fn finish(out: *mut StbString, result: Result<Reply, String>) -> i32 {
+    match result {
+        Ok(Reply::Text(text)) => emit(out, &text),
+        Ok(Reply::Ui(value)) => {
+            unsafe {
+                *out = StbString::from_string(value.to_string());
+            }
+            0
+        }
+        Err(error) => emit_error(out, error),
+    }
+}
+
+/// Selector items for the live instance list (value = display name, the same
+/// token `/use`/`/msg` accept).
+fn selector_items(hub: &Hub) -> Result<Vec<serde_json::Value>, String> {
+    let instances = hub.instances(now_ms())?;
+    if instances.is_empty() {
+        return Err("没有登记的实例".to_string());
+    }
+    let holder = hub
+        .store
+        .lease_holder("wechat")
+        .map_err(|e| e.to_string())?;
+    Ok(instances
+        .iter()
+        .enumerate()
+        .map(|(index, instance)| {
+            let mut label = format!("{}. {}", index + 1, instance.label());
+            if instance.node_id == hub.node_id {
+                label.push_str("（当前）");
+            }
+            if holder
+                .as_ref()
+                .is_some_and(|h| h.owner_node == instance.node_id)
+            {
+                label.push_str("（微信）");
+            }
+            if instance.busy {
+                label.push_str(" 忙");
+            }
+            serde_json::json!({
+                "value": instance.label(),
+                "label": label,
+                "description": instance.cwd,
+            })
+        })
+        .collect())
+}
+
+/// `/msg` `/cmd` `/ask` argument shape: `<target> <free text>`, where the text
+/// may be empty (then the UI asks for it in an editor).
+#[derive(Debug, Default, Clone)]
+struct MsgFlow {
+    target: Option<String>,
+    text: Option<String>,
+    draft: String,
+}
+
+impl MsgFlow {
+    fn parse(args: &str) -> Self {
+        let (target, rest) = split_target(args);
+        if target.is_empty() {
+            return Self {
+                draft: args.trim().to_string(),
+                ..Default::default()
+            };
+        }
+        Self {
+            target: Some(target.to_string()),
+            text: (!rest.trim().is_empty()).then(|| rest.trim().to_string()),
+            draft: rest.trim().to_string(),
+        }
+    }
+}
+
+/// Build the selector payload for a command handler.
+fn selector_payload(items: &[serde_json::Value]) -> Reply {
+    Reply::Ui(serde_json::json!({
+        "kind": "selector",
+        "title": "选择实例",
+        "items": items,
+    }))
+}
+
+/// Editor payload (free text asked after a target was picked).
+fn editor_payload(title: String, initial: &str) -> Reply {
+    Reply::Ui(serde_json::json!({
+        "kind": "editor",
+        "title": title,
+        "initialText": initial,
+    }))
+}
+
+/// First render of a command: the TUI opens a selector; the user's pick (or a
+/// cancel) re-enters the same command with `action` set.
+fn emit_selector(out: *mut StbString, title: &str, items: &[serde_json::Value]) -> i32 {
+    let payload = serde_json::json!({ "kind": "selector", "title": title, "items": items });
+    unsafe {
+        *out = StbString::from_string(payload.to_string());
+    }
+    0
+}
+
 fn args_of(raw: StbStringRef) -> String {
     let text = unsafe { raw.as_str() }.to_string();
     serde_json::from_str::<serde_json::Value>(&text)
@@ -74,80 +185,106 @@ extern "C" fn cmd_instances(raw: StbStringRef, out: *mut StbString, _ud: *mut c_
 
 extern "C" fn cmd_use(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
     let args = args_of(raw);
-    let result = (|| -> Result<String, String> {
+    let result = (|| -> Result<Reply, String> {
         let hub = hub()?;
+        // The TUI re-invokes the command with {"action":"select","value":…}
+        // (or {"action":"cancel"}) after the user picks from the selector.
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&args) {
+            match value.get("action").and_then(|v| v.as_str()) {
+                Some("cancel") => return Ok(Reply::Text("已取消".to_string())),
+                Some("select") => {
+                    let picked = value
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .ok_or("selection missing value")?;
+                    let target = hub.resolve_target(picked)?;
+                    return hub.switch_lease_to(&target).map(Reply::Text);
+                }
+                _ => {}
+            }
+        }
         let query = args.trim();
         if query.is_empty() {
-            let holder = hub
-                .store
-                .lease_holder("wechat")
-                .map_err(|e| e.to_string())?;
-            let current = match holder {
-                Some(holder) => format!("当前微信接管: {}", holder.owner_name),
-                None => "当前微信接管: (无)".to_string(),
-            };
-            return Ok(format!("{current}\n用法: /use <实例名|编号>"));
+            let items = selector_items(&hub)?;
+            return Ok(selector_payload(&items));
         }
         let target = hub.resolve_target(query)?;
-        let generation = hub
-            .store
-            .assign_lease(
-                "wechat",
-                &target.node_id,
-                &target.name,
-                now_ms(),
-                hub.config.lease.ttl_ms(),
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(format!(
-            "微信接管已切换到 {}{}（generation {generation}）",
-            target.label(),
-            if target.node_id == hub.node_id {
-                "（本实例）"
-            } else {
-                ""
-            }
-        ))
+        hub.switch_lease_to(&target).map(Reply::Text)
     })();
-    match result {
-        Ok(text) => emit(out, &text),
-        Err(error) => emit_error(out, error),
-    }
+    finish(out, result)
 }
 
 extern "C" fn cmd_msg(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
     let args = args_of(raw);
-    let result = (|| -> Result<String, String> {
+    let result = (|| -> Result<Reply, String> {
         let hub = hub()?;
-        let (target, text) = split_target(&args);
-        if target.is_empty() || text.is_empty() {
-            return Err("用法: /msg <实例> <内容>".to_string());
+        let mut flow = MsgFlow::parse(&args);
+        // Same select/cancel re-entry contract as /use.
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&args) {
+            match value.get("action").and_then(|v| v.as_str()) {
+                Some("cancel") => return Ok(Reply::Text("已取消".to_string())),
+                Some("select") => {
+                    flow.target = value
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                }
+                _ => {}
+            }
         }
-        let target = hub.resolve_target(target)?;
+        let Some(target_query) = flow.target.clone() else {
+            let items = selector_items(&hub)?;
+            return Ok(selector_payload(&items));
+        };
+        let Some(text) = flow.text.clone() else {
+            // Target chosen: ask for the message body in an editor pre-filled
+            // with the rest of the command line, if any.
+            return Ok(editor_payload(
+                format!("发给 {target_query} 的消息"),
+                &flow.draft,
+            ));
+        };
+        let target = hub.resolve_target(&target_query)?;
         let envelope =
             Envelope::text(&hub.node_id, &hub.name(), &target.node_id, text, now_ms())
                 .map_err(|e| e.to_string())?;
         hub.deliver(envelope)?;
-        Ok(format!("已发送给 {}", target.label()))
+        Ok(Reply::Text(format!("已发送给 {}", target.label())))
     })();
-    match result {
-        Ok(text) => emit(out, &text),
-        Err(error) => emit_error(out, error),
-    }
+    finish(out, result)
 }
 
 extern "C" fn cmd_cmd(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
     let args = args_of(raw);
-    let result = (|| -> Result<String, String> {
+    let result = (|| -> Result<Reply, String> {
         let hub = hub()?;
-        let (target, command) = split_target(&args);
-        if target.is_empty() || command.is_empty() {
-            return Err("用法: /cmd <实例> <指令>（如 /cmd home /reload）".to_string());
+        let mut flow = MsgFlow::parse(&args);
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&args) {
+            match value.get("action").and_then(|v| v.as_str()) {
+                Some("cancel") => return Ok(Reply::Text("已取消".to_string())),
+                Some("select") => {
+                    flow.target = value
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                }
+                _ => {}
+            }
         }
-        let target = hub.resolve_target(target)?;
-        let intent = CommandIntent::parse(command).map_err(|e| e.to_string())?;
+        let Some(target_query) = flow.target.clone() else {
+            let items = selector_items(&hub)?;
+            return Ok(selector_payload(&items));
+        };
+        let Some(command) = flow.text.clone().filter(|t| !t.trim().is_empty()) else {
+            return Ok(editor_payload(
+                format!("发给 {target_query} 的指令（如 reload，不用带实例名）"),
+                &flow.draft,
+            ));
+        };
+        let target = hub.resolve_target(&target_query)?;
+        let intent = CommandIntent::parse(&command).map_err(|e| e.to_string())?;
         if target.node_id == hub.node_id {
-            return intent::execute(&hub, &intent);
+            return intent::execute(&hub, &intent).map(Reply::Text);
         }
         // 带 correlation：目标执行完会把结果作为 Reply 投回本实例，worker
         // 收到后以通知形式展示（否则结果只会出现在目标自己的会话里）。
@@ -155,26 +292,42 @@ extern "C" fn cmd_cmd(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
         let envelope = Envelope::command(&hub.node_id, &hub.name(), &target.node_id, intent, now_ms())
             .with_correlation(&correlation);
         hub.deliver(envelope)?;
-        Ok(format!(
+        Ok(Reply::Text(format!(
             "已发送给 {}；结果会以通知形式返回",
             target.label()
-        ))
+        )))
     })();
-    match result {
-        Ok(text) => emit(out, &text),
-        Err(error) => emit_error(out, error),
-    }
+    finish(out, result)
 }
 
 extern "C" fn cmd_ask(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
     let args = args_of(raw);
-    let result = (|| -> Result<String, String> {
+    let result = (|| -> Result<Reply, String> {
         let hub = hub()?;
-        let (target, task) = split_target(&args);
-        if target.is_empty() || task.is_empty() {
-            return Err("用法: /ask <实例> <任务>".to_string());
+        let mut flow = MsgFlow::parse(&args);
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&args) {
+            match value.get("action").and_then(|v| v.as_str()) {
+                Some("cancel") => return Ok(Reply::Text("已取消".to_string())),
+                Some("select") => {
+                    flow.target = value
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                }
+                _ => {}
+            }
         }
-        let target = hub.resolve_target(target)?;
+        let Some(target_query) = flow.target.clone() else {
+            let items = selector_items(&hub)?;
+            return Ok(selector_payload(&items));
+        };
+        let Some(task) = flow.text.clone().filter(|t| !t.trim().is_empty()) else {
+            return Ok(editor_payload(
+                format!("委派给 {target_query} 的任务"),
+                &flow.draft,
+            ));
+        };
+        let target = hub.resolve_target(&target_query)?;
         // correlation 让目标实例在回合结束时把结果投回本实例（否则结果只会
         // 出现在目标自己的会话里）。
         let correlation = rpi_hub_core::protocol::new_id();
@@ -182,20 +335,17 @@ extern "C" fn cmd_ask(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
             .map_err(|e| e.to_string())?
             .with_correlation(&correlation);
         hub.deliver(envelope)?;
-        Ok(format!(
+        Ok(Reply::Text(format!(
             "任务已交给 {}；结果会以通知形式返回",
             target.label()
-        ))
+        )))
     })();
-    match result {
-        Ok(text) => emit(out, &text),
-        Err(error) => emit_error(out, error),
-    }
+    finish(out, result)
 }
 
 extern "C" fn cmd_run(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
     let args = args_of(raw);
-    let result = (|| -> Result<String, String> {
+    let result = (|| -> Result<Reply, String> {
         let hub = hub()?;
         let (host_name, task) = split_target(&args);
         if host_name.is_empty() || task.is_empty() {
@@ -229,17 +379,16 @@ extern "C" fn cmd_run(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
             std::time::Duration::from_secs(600),
             None,
         );
-        Ok(format!("已在 {host_name} 上启动任务；结果会以通知形式返回"))
+        Ok(Reply::Text(format!(
+            "已在 {host_name} 上启动任务；结果会以通知形式返回"
+        )))
     })();
-    match result {
-        Ok(text) => emit(out, &text),
-        Err(error) => emit_error(out, error),
-    }
+    finish(out, result)
 }
 
 extern "C" fn cmd_hub(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
     let args = args_of(raw);
-    let result = (|| -> Result<String, String> {
+    let result = (|| -> Result<Reply, String> {
         let hub = hub()?;
         let (sub, rest) = split_target(&args);
         match sub {
@@ -265,7 +414,7 @@ extern "C" fn cmd_hub(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
             "who" => tools::format_leases(&hub),
             "name" => {
                 if rest.is_empty() {
-                    return Ok(format!("当前实例名: {}", hub.name()));
+                    return Ok(Reply::Text(format!("当前实例名: {}", hub.name())));
                 }
                 let name = hub.rename(rest)?;
                 Ok(format!("实例名已设为 {name}"))
@@ -278,9 +427,7 @@ extern "C" fn cmd_hub(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
                 "未知子命令 {other:?}；可用: status | who | name <名> | leave"
             )),
         }
+        .map(Reply::Text)
     })();
-    match result {
-        Ok(text) => emit(out, &text),
-        Err(error) => emit_error(out, error),
-    }
+    finish(out, result)
 }

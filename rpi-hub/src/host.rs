@@ -410,6 +410,29 @@ impl Hub {
         }
     }
 
+    /// Move the wechat lease to `target` — shared by `/use` and the selector.
+    pub fn switch_lease_to(&self, target: &InstanceView) -> Result<String, String> {
+        let generation = self
+            .store
+            .assign_lease(
+                "wechat",
+                &target.node_id,
+                &target.name,
+                now_ms(),
+                self.config.lease.ttl_ms(),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(format!(
+            "微信接管已切换到 {}{}（generation {generation}）",
+            target.label(),
+            if target.node_id == self.node_id {
+                "（本实例）"
+            } else {
+                ""
+            }
+        ))
+    }
+
     /// Presence record for the store, built from the current session snapshot.
     pub fn record(&self, last_seen: i64) -> InstanceRecord {
         let snapshot = self.session_snapshot();
