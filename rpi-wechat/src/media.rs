@@ -52,7 +52,7 @@ pub fn aes_encrypt_ecb(plaintext: &[u8], key_hex: &str) -> Result<Vec<u8>, Ilink
     if plaintext.is_empty() {
         return Err(IlinkError::Protocol("cannot encrypt empty payload".into()));
     }
-    let key = decode_hex_key(key_hex)?;;
+    let key = decode_hex_key(key_hex)?;
     let mut cipher = Aes128EcbEnc::new_from_slice(&key)
         .map_err(|e| IlinkError::Protocol(format!("aes key init: {e}")))?;
     let padded_len = (plaintext.len() / 16 + 1) * 16;
@@ -196,12 +196,7 @@ pub fn save_to_disk(dir: &Path, file_name: &str, bytes: &[u8]) -> Result<PathBuf
             }
         })
         .collect();
-    let unique = format!(
-        "{}_{:08}_{}",
-        now_ms(),
-        md5_short(file_name),
-        sanitized
-    );
+    let unique = format!("{}_{:08}_{}", now_ms(), md5_short(file_name), sanitized);
     let path = dir.join(unique);
     let mut file =
         std::fs::File::create(&path).map_err(|e| IlinkError::Io(format!("create: {e}")))?;

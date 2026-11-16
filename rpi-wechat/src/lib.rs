@@ -37,11 +37,7 @@ rpi_plugin_sdk::export_plugin!(|api| {
             return 0;
         }
     };
-    hub.set_bridge(
-        api.user_data,
-        api.runtime_action,
-        api.free_string,
-    );
+    hub.set_bridge(api.user_data, api.runtime_action, api.free_string);
 
     if let Some(register_command) = api.register_command {
         for (name, description, handler) in commands::registry() {
@@ -56,7 +52,9 @@ rpi_plugin_sdk::export_plugin!(|api| {
         }
     }
     if let Err(error) = outbound::register(&hub, &api) {
-        host::log(&format!("rpi-wechat: outbound tools not registered: {error}"));
+        host::log(&format!(
+            "rpi-wechat: outbound tools not registered: {error}"
+        ));
     }
 
     if let Some(register_event) = api.register_event_handler {
@@ -65,11 +63,7 @@ rpi_plugin_sdk::export_plugin!(|api| {
         }
     }
     if let Some(register_lifecycle) = api.register_plugin_lifecycle {
-        let _ = register_lifecycle(
-            lifecycle_begin,
-            lifecycle_finish,
-            hub.bridge_ptr(),
-        );
+        let _ = register_lifecycle(lifecycle_begin, lifecycle_finish, hub.bridge_ptr());
     }
     // Auto-start the bridge when credentials exist, the disabled flag is off,
     // and the wechat lease is free (claim is inside spawn_bridge).

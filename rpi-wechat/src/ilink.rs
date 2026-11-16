@@ -126,7 +126,7 @@ impl IlinkClient {
             Value::Null
         } else {
             serde_json::from_str(text)
-                .map_err(|e| IlinkError::Protocol(format!("{label}: bad JSON ({e})")))? 
+                .map_err(|e| IlinkError::Protocol(format!("{label}: bad JSON ({e})")))?
         };
         if !(200..300).contains(&status) {
             let message = value
@@ -201,13 +201,8 @@ impl IlinkClient {
 
     /// `get_qrcode_status` — poll until confirmed/expired.
     pub async fn qrcode_status(&self, qrcode: &str) -> Result<QrStatus, IlinkError> {
-        let path = format!(
-            "/ilink/bot/get_qrcode_status?qrcode={}",
-            urlencode(qrcode)
-        );
-        let value = self
-            .get(&path, &[(CLIENT_VERSION_HEADER, "1")])
-            .await?;
+        let path = format!("/ilink/bot/get_qrcode_status?qrcode={}", urlencode(qrcode));
+        let value = self.get(&path, &[(CLIENT_VERSION_HEADER, "1")]).await?;
         let status = value
             .get("status")
             .and_then(|v| v.as_str())
@@ -445,9 +440,7 @@ impl IlinkClient {
             .get("x-encrypted-param")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string)
-            .ok_or_else(|| {
-                IlinkError::Protocol("cdn upload missing x-encrypted-param".into())
-            })
+            .ok_or_else(|| IlinkError::Protocol("cdn upload missing x-encrypted-param".into()))
     }
 
     /// `sendmessage` with arbitrary item list (media).
@@ -557,7 +550,9 @@ pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
                     if std::env::var("RPI_HUB_DEBUG").ok().as_deref() == Some("1") {
                         eprintln!(
                             "[ilink] image_item={}",
-                            item.get("image_item").map(|v| v.to_string()).unwrap_or_default()
+                            item.get("image_item")
+                                .map(|v| v.to_string())
+                                .unwrap_or_default()
                         );
                     }
                     if image.is_none() {
@@ -661,9 +656,10 @@ fn percent_decode(value: &str) -> String {
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(byte) =
-                u8::from_str_radix(std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("zz"), 16)
-            {
+            if let Ok(byte) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("zz"),
+                16,
+            ) {
                 out.push(byte);
                 index += 3;
                 continue;

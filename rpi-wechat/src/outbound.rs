@@ -5,9 +5,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rpi_hub_core::now_ms;
-use rpi_plugin_sdk::handles::ToolHandles;
 use rpi_plugin_sdk::callbacks::free_string;
+use rpi_plugin_sdk::handles::ToolHandles;
 use rpi_plugin_sdk::{StbString, StepHandle, StepResult, ToolPartialCb};
 
 use md5::{Digest, Md5};
@@ -34,14 +33,14 @@ static DRIVES: ToolHandles<OutboundDrive> = ToolHandles::new();
 
 /// Send one local file to the bound user. Runs on the bridge runtime.
 pub async fn send_file(
-    hub: &Arc<Hub>,
+    _hub: &Arc<Hub>,
     client: &crate::ilink::IlinkClient,
     user_id: &str,
     path: &Path,
     is_image: bool,
 ) -> Result<String, IlinkError> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| IlinkError::Io(format!("read {}: {e}", path.display())))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| IlinkError::Io(format!("read {}: {e}", path.display())))?;
     if bytes.is_empty() {
         return Err(IlinkError::Protocol("file is empty".into()));
     }
@@ -56,7 +55,10 @@ pub async fn send_file(
         let mut hasher = Md5::new();
         hasher.update(&bytes);
         let digest = hasher.finalize();
-        digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     };
     let media_type = if is_image { 2 } else { 3 };
     let upload_param = client
@@ -157,7 +159,7 @@ fn parse_and_validate(params: &str, hub: &Hub) -> Result<(PathBuf, bool), String
     Ok((resolved, is_image))
 }
 
-fn drive_send(hub: &Arc<Hub>, path: PathBuf, is_image: bool) -> Result<String, String> {
+fn drive_send(_hub: &Arc<Hub>, path: PathBuf, is_image: bool) -> Result<String, String> {
     host::log(&format!(
         "outbound: drive_send path={} is_image={}",
         path.display(),
@@ -171,11 +173,9 @@ fn drive_send(hub: &Arc<Hub>, path: PathBuf, is_image: bool) -> Result<String, S
     else {
         return Err("微信未登录".into());
     };
-    let client = crate::ilink::IlinkClient::new(
-        &hub.credentials_base_url(),
-        &hub.credentials_token(),
-    )
-    .map_err(|e| e.to_string())?;
+    let client =
+        crate::ilink::IlinkClient::new(&hub.credentials_base_url(), &hub.credentials_token())
+            .map_err(|e| e.to_string())?;
     host::log("outbound: client built");
     let runtime = tokio_lite();
     let result = runtime.block_on(async move {
@@ -255,7 +255,9 @@ extern "C" fn send_poll(
                         let token = handle as usize;
                         std::thread::spawn(move || {
                             let outcome = match hub {
-                                Some(hub) => drive_send(&hub, std::path::PathBuf::from(path), is_image),
+                                Some(hub) => {
+                                    drive_send(&hub, std::path::PathBuf::from(path), is_image)
+                                }
                                 None => Err("rpi-wechat 未初始化".into()),
                             };
                             if let Some(entry) = SEND.get(token as StepHandle) {

@@ -21,9 +21,8 @@ use std::time::Duration;
 
 use rpi_hub_core::now_ms;
 
-use crate::host::Hub;
-use crate::error::IlinkError;
 use crate::host;
+use crate::host::Hub;
 use crate::ilink::{self, IlinkClient};
 
 /// Backoff after a transport error.
@@ -127,7 +126,7 @@ pub fn authorized_and_new(
 pub async fn run(
     hub: Arc<Hub>,
     ctx: BridgeContext,
-    runtime: Arc<tokio::runtime::Runtime>,
+    _runtime: Arc<tokio::runtime::Runtime>,
 ) -> StopReason {
     let media_dir = |hub: &Arc<Hub>| -> PathBuf {
         let dir = crate::state::wechat_dir(&hub.dir).join("media");
@@ -139,6 +138,7 @@ pub async fn run(
     let mut backoff = TRANSPORT_BACKOFF;
     let mut context_token: Option<String> = None;
     let mut typing_ticket: Option<String> = None;
+    let mut pending_chunks: Vec<String> = Vec::new();
 
     loop {
         if hub.shutdown.requested() {
@@ -201,12 +201,8 @@ pub async fn run(
                             // Transcript marker: the injected user message
                             // would otherwise read as a local prompt.
                             let _ = hub.notice(&format!("📨 微信: {text}"));
-                            if let Err(error) =
-                                hub.send_user_message(&text, Some("steer"))
-                            {
-                                hub.record_error(format!(
-                                    "wechat: cannot inject message: {error}"
-                                ));
+                            if let Err(error) = hub.send_user_message(&text, Some("steer")) {
+                                hub.record_error(format!("wechat: cannot inject message: {error}"));
                                 let _ = ctx
                                     .client
                                     .send_text(
@@ -239,12 +235,8 @@ pub async fn run(
                             let download = ctx.client.clone();
                             let url = payload.url.clone();
                             let key = payload.aes_key.clone();
-                            let download_result = crate::media::download_image(
-                                &download,
-                                &url,
-                                key.as_deref(),
-                            )
-                            .await;
+                            let download_result =
+                                crate::media::download_image(&download, &url, key.as_deref()).await;
                             let (bytes, _media_type) = match download_result {
                                 Ok(pair) => pair,
                                 Err(error) => {
@@ -260,18 +252,13 @@ pub async fn run(
                                     continue;
                                 }
                             };
-                            let image_result = crate::media::save_to_disk(
-                                &media_dir(&hub),
-                                "image.jpg",
-                                &bytes,
-                            );
+                            let image_result =
+                                crate::media::save_to_disk(&media_dir(&hub), "image.jpg", &bytes);
                             match image_result {
                                 Ok(path) => {
                                     host::log(&format!("image saved: {}", path.display()));
-                                    let _ = hub.notice(&format!(
-                                        "📨 微信图片已保存: {}",
-                                        path.display()
-                                    ));
+                                    let _ = hub
+                                        .notice(&format!("📨 微信图片已保存: {}", path.display()));
                                     if let Err(error) = hub.send_user_message(
                                         &format!(
                                             "[微信图片已保存到 {}，可用 read 工具查看]",
@@ -306,12 +293,9 @@ pub async fn run(
                             let param = payload.encrypt_param.clone();
                             let key = payload.aes_key.clone();
                             let name = payload.file_name.clone();
-                            let download_result = crate::media::download_file(
-                                &download,
-                                &param,
-                                key.as_deref(),
-                            )
-                            .await;
+                            let download_result =
+                                crate::media::download_file(&download, &param, key.as_deref())
+                                    .await;
                             let bytes = match download_result {
                                 Ok(bytes) => bytes,
                                 Err(error) => {
@@ -327,17 +311,12 @@ pub async fn run(
                                     continue;
                                 }
                             };
-                            let file_result = crate::media::save_to_disk(
-                                &media_dir(&hub),
-                                &name,
-                                &bytes,
-                            );
+                            let file_result =
+                                crate::media::save_to_disk(&media_dir(&hub), &name, &bytes);
                             match file_result {
                                 Ok(path) => {
-                                    let _ = hub.notice(&format!(
-                                        "📨 微信文件已保存: {}",
-                                        path.display()
-                                    ));
+                                    let _ = hub
+                                        .notice(&format!("📨 微信文件已保存: {}", path.display()));
                                     if let Err(error) = hub.send_user_message(
                                         &format!(
                                             "[微信文件已保存到 {}，文件名 {}]",
@@ -382,11 +361,32 @@ pub async fn run(
             }
         }
 
+        // ---- outbound: pending (stale-token) chunks first, then fresh ----
+        if !pending_chunks.is_empty() && context_token.is_some() {
+            let mut undelivered = Vec::new();
+            for chunk in pending_chunks.drain(..) {
+                if let Err(error) = ctx
+                    .client
+                    .send_text(&ctx.user_id, &chunk, context_token.as_deref())
+                    .await
+                {
+                    hub.record_error(format!("wechat: pending resend failed: {error}"));
+                    undelivered.push(chunk);
+                    break;
+                }
+            }
+            pending_chunks = undelivered;
+        }
+
         // ---- outbound: reply chunks queued by the event thread ----
         let mut sent_count = 0;
         while let Ok(chunk) = ctx.outbound.try_recv() {
             sent_count += 1;
-            host::log(&format!("outbound sending chunk {} ({} chars)", sent_count, chunk.len()));
+            host::log(&format!(
+                "outbound sending chunk {} ({} chars)",
+                sent_count,
+                chunk.len()
+            ));
             if let Err(error) = ctx
                 .client
                 .send_text(&ctx.user_id, &chunk, context_token.as_deref())
@@ -402,7 +402,12 @@ pub async fn run(
         // ---- typing ticket refresh (cheap, every loop) ----
         if let Some(token) = &context_token {
             if typing_ticket.is_none() {
-                typing_ticket = ctx.client.typing_ticket(&ctx.user_id, token).await.ok().flatten();
+                typing_ticket = ctx
+                    .client
+                    .typing_ticket(&ctx.user_id, token)
+                    .await
+                    .ok()
+                    .flatten();
             }
         }
 
@@ -420,12 +425,9 @@ async fn tokio_time(duration: Duration) {
 /// Store-level lease hand-off used by `/wechat stop`: release and stop.
 pub fn release_and_stop(hub: &Arc<Hub>) {
     if let Some(lease) = hub.lease.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
-        let _ = hub.store.release_lease(
-            "wechat",
-            &hub.node_id,
-            &hub.epoch,
-            lease.generation,
-        );
+        let _ = hub
+            .store
+            .release_lease("wechat", &hub.node_id, &hub.epoch, lease.generation);
     }
     hub.request_shutdown();
 }

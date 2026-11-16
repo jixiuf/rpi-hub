@@ -7,10 +7,15 @@ use qrcode::types::Color;
 
 /// Render `text` as terminal half-block QR (2 rows per character line).
 pub fn render_terminal(text: &str) -> Result<String, String> {
-    let code = qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::types::EcLevel::M)
-        .map_err(|e| format!("qr encode failed: {e}"))?;
+    let code =
+        qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::types::EcLevel::M)
+            .map_err(|e| format!("qr encode failed: {e}"))?;
     let width = code.width();
-    let colors: Vec<bool> = code.to_colors().into_iter().map(|c| c == Color::Dark).collect();
+    let colors: Vec<bool> = code
+        .to_colors()
+        .into_iter()
+        .map(|c| c == Color::Dark)
+        .collect();
     let cell = |x: usize, y: usize| colors.get(y * width + x).copied().unwrap_or(false);
 
     let mut out = String::new();

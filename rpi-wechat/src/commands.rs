@@ -1,7 +1,7 @@
 //! Plugin registration, commands, event handlers and the bridge thread.
 
-use std::sync::Arc;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rpi_plugin_sdk::{CommandHandlerFn, EventHandlerFn, EventTag, StbString, StbStringRef};
@@ -15,13 +15,11 @@ use crate::state::{self, Credentials};
 
 /// Commands the plugin exposes.
 pub fn registry() -> Vec<(&'static str, &'static str, CommandHandlerFn)> {
-    vec![
-        (
-            "wechat",
-            "微信通道：/wechat login|start|stop|status",
-            cmd_wechat,
-        ),
-    ]
+    vec![(
+        "wechat",
+        "微信通道：/wechat login|start|stop|status",
+        cmd_wechat,
+    )]
 }
 
 fn emit(out: *mut StbString, text: &str) -> i32 {
@@ -75,13 +73,12 @@ fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String>
         }
     }
 
-    let client = IlinkClient::new(&credentials.base_url, &credentials.token)
-        .map_err(|e| e.to_string())?;
+    let client =
+        IlinkClient::new(&credentials.base_url, &credentials.token).map_err(|e| e.to_string())?;
     hub.set_credentials(&credentials.base_url, &credentials.token);
     let (sender, receiver) = mpsc::channel::<String>();
     hub.set_outbound(sender);
-    *hub.user_id.lock().unwrap_or_else(|p| p.into_inner()) =
-        Some(credentials.user_id.clone());
+    *hub.user_id.lock().unwrap_or_else(|p| p.into_inner()) = Some(credentials.user_id.clone());
 
     let ctx = BridgeContext {
         client,
@@ -119,7 +116,11 @@ fn tokio_lite() -> tokio::runtime::Runtime {
 // Commands
 // ---------------------------------------------------------------------------
 
-extern "C" fn cmd_wechat(raw: StbStringRef, out: *mut StbString, _ud: *mut std::ffi::c_void) -> i32 {
+extern "C" fn cmd_wechat(
+    raw: StbStringRef,
+    out: *mut StbString,
+    _ud: *mut std::ffi::c_void,
+) -> i32 {
     let args = args_of(raw);
     host::log(&format!("cmd /wechat {args:?}"));
     let result = run_command(&args);
@@ -142,7 +143,10 @@ fn run_command(args: &str) -> Result<String, String> {
     match sub.as_str() {
         "" | "status" => {
             let credentials = Credentials::load(&dir);
-            let holder = hub.store.lease_holder("wechat").map_err(|e| e.to_string())?;
+            let holder = hub
+                .store
+                .lease_holder("wechat")
+                .map_err(|e| e.to_string())?;
             Ok(format!(
                 "实例: {}\n凭据: {}\n桥: {}\n绑定用户: {}\n微信接管: {}\n禁用标志: {}",
                 hub.label(),
@@ -159,7 +163,11 @@ fn run_command(args: &str) -> Result<String, String> {
                 holder
                     .map(|h| format!("{}（generation {}）", h.owner_name, h.generation))
                     .unwrap_or_else(|| "(无)".into()),
-                if state::is_disabled(&dir) { "已停用" } else { "启用" },
+                if state::is_disabled(&dir) {
+                    "已停用"
+                } else {
+                    "启用"
+                },
             ))
         }
         "login" => {
@@ -175,8 +183,7 @@ fn run_command(args: &str) -> Result<String, String> {
             if running {
                 return Ok("桥已在运行".into());
             }
-            let credentials =
-                Credentials::load(&dir).ok_or("未登录：先 /wechat login 扫码绑定")?;
+            let credentials = Credentials::load(&dir).ok_or("未登录：先 /wechat login 扫码绑定")?;
             spawn_bridge(&hub, &credentials)?;
             Ok(format!("微信桥已启动（{}）", hub.label()))
         }
@@ -195,8 +202,7 @@ fn run_command(args: &str) -> Result<String, String> {
 /// confirmation polling runs on a background thread and auto-starts the
 /// bridge, reporting the result as a transcript notice.
 fn login_flow(hub: &Arc<Hub>) -> Result<String, String> {
-    let client = IlinkClient::new(crate::ilink::DEFAULT_BASE_URL, "")
-        .map_err(|e| e.to_string())?;
+    let client = IlinkClient::new(crate::ilink::DEFAULT_BASE_URL, "").map_err(|e| e.to_string())?;
     let login_runtime = tokio_lite();
     let (qrcode, login_url) = login_runtime
         .block_on(client.login_qrcode())
@@ -213,15 +219,11 @@ fn login_flow(hub: &Arc<Hub>) -> Result<String, String> {
             let runtime = tokio_lite();
             let deadline = std::time::Instant::now() + Duration::from_secs(180);
             loop {
-                if thread_hub.shutdown.requested()
-                    || std::time::Instant::now() >= deadline
-                {
+                if thread_hub.shutdown.requested() || std::time::Instant::now() >= deadline {
                     let _ = thread_hub.notice("❌ 二维码超时未确认，重新 /wechat login");
                     return;
                 }
-                let status = match runtime
-                    .block_on(thread_client.qrcode_status(&thread_qrcode))
-                {
+                let status = match runtime.block_on(thread_client.qrcode_status(&thread_qrcode)) {
                     Ok(status) => status,
                     Err(error) => {
                         thread_hub.record_error(format!("wechat login poll: {error}"));

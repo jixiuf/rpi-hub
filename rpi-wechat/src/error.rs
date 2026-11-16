@@ -40,6 +40,12 @@ impl std::error::Error for IlinkError {}
 impl IlinkError {
     /// `errcode == -14`: the bot session expired and a QR re-login is required.
     pub fn is_session_expired(&self) -> bool {
-        matches!(self, IlinkError::Api { code: Some(-14), .. })
+        matches!(
+            self,
+            IlinkError::Api {
+                code: Some(-14),
+                ..
+            }
+        )
     }
 }

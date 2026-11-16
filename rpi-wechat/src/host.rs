@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use rpi_hub_core::config::{self, HubConfig};
 use rpi_hub_core::names;
-use rpi_hub_core::paths;
 use rpi_hub_core::now_ms;
+use rpi_hub_core::paths;
 use rpi_hub_core::store::{Claim, InstanceRecord, Store};
 use rpi_plugin_sdk::callbacks::OwnedString;
 use rpi_plugin_sdk::{RuntimeActionFn, RuntimeActionId, StbString, StbStringRef};
@@ -53,7 +53,11 @@ pub fn log(message: &str) {
         }
     }
     use std::io::Write;
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = file.write_all(line.as_bytes());
     }
 }
@@ -249,7 +253,8 @@ impl Hub {
         if let Some(deliver_as) = deliver_as {
             args["deliverAs"] = serde_json::json!(deliver_as);
         }
-        self.action(RuntimeActionId::SendUserMessage, args).map(|_| ())
+        self.action(RuntimeActionId::SendUserMessage, args)
+            .map(|_| ())
     }
 
     /// Show text in the transcript without running the model.
@@ -308,10 +313,8 @@ impl Hub {
 
     /// Cache credentials for the outbound media tools.
     pub fn set_credentials(&self, base_url: &str, token: &str) {
-        *self
-            .credentials
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Some((base_url.to_string(), token.to_string()));
+        *self.credentials.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((base_url.to_string(), token.to_string()));
     }
 
     pub fn credentials_token(&self) -> String {
@@ -349,7 +352,11 @@ impl Hub {
 
     /// Queue an assistant reply; the bridge thread drains and chunks it.
     pub fn queue_reply(&self, text: &str) {
-        let sender = self.outbound.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let sender = self
+            .outbound
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let Some(sender) = sender else {
             return;
         };
