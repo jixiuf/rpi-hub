@@ -28,6 +28,14 @@ pub fn aes_decrypt_ecb(ciphertext: &[u8], key_hex: &str) -> Result<Vec<u8>, Ilin
     let key = decode_hex_key(key_hex)?;
     let mut cipher = Aes128Ecb::new_from_slice(&key)
         .map_err(|e| IlinkError::Protocol(format!("aes key init: {e}")))?;
+    // ECB requires complete 16-byte blocks: a truncated download or an error
+    // page would panic inside decrypt_block_mut and kill the bridge thread.
+    if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
+        return Err(IlinkError::Protocol(format!(
+            "ciphertext length {} is not AES-block aligned",
+            ciphertext.len()
+        )));
+    }
     let mut buffer = ciphertext.to_vec();
     for chunk in buffer.chunks_mut(16) {
         cipher.decrypt_block_mut(chunk.into());
@@ -38,7 +46,10 @@ pub fn aes_decrypt_ecb(ciphertext: &[u8], key_hex: &str) -> Result<Vec<u8>, Ilin
 /// AES-128-ECB encrypt with PKCS#7 padding.
 pub fn aes_encrypt_ecb(plaintext: &[u8], key_hex: &str) -> Result<Vec<u8>, IlinkError> {
     type Aes128EcbEnc = ecb::Encryptor<aes::Aes128>;
-    let key = decode_hex_key(key_hex)?;
+    if plaintext.is_empty() {
+        return Err(IlinkError::Protocol("cannot encrypt empty payload".into()));
+    }
+    let key = decode_hex_key(key_hex)?;;
     let mut cipher = Aes128EcbEnc::new_from_slice(&key)
         .map_err(|e| IlinkError::Protocol(format!("aes key init: {e}")))?;
     let padded_len = (plaintext.len() / 16 + 1) * 16;
