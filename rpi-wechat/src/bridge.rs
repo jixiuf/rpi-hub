@@ -23,6 +23,7 @@ use rpi_hub_core::now_ms;
 
 use crate::host::Hub;
 use crate::error::IlinkError;
+use crate::host;
 use crate::ilink::{self, IlinkClient};
 
 /// Backoff after a transport error.
@@ -227,8 +228,14 @@ pub async fn run(
                         }
                         "image" => {
                             let Some(payload) = incoming.image.clone() else {
+                                host::log("image branch: no payload");
                                 continue;
                             };
+                            host::log(&format!(
+                                "image branch: url={} key={}",
+                                payload.url,
+                                payload.aes_key.is_some()
+                            ));
                             let download = ctx.client.clone();
                             let url = payload.url.clone();
                             let key = payload.aes_key.clone();
@@ -240,6 +247,7 @@ pub async fn run(
                             });
                             match result {
                                 Ok(path) => {
+                                    host::log(&format!("image saved: {}", path.display()));
                                     let _ = hub.notice(&format!(
                                         "📨 微信图片已保存: {}",
                                         path.display()
@@ -257,6 +265,7 @@ pub async fn run(
                                     }
                                 }
                                 Err(error) => {
+                                    host::log(&format!("image download failed: {error}"));
                                     hub.record_error(format!("wechat image: {error}"));
                                     let _ = ctx
                                         .client
