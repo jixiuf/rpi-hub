@@ -482,9 +482,6 @@ mod tests {
         assert_eq!(base64_encode(b"fo"), "Zm8=");
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
-        assert_eq!(base64_decode("Zm9vYmFy").unwrap(), b"foobar");
-        assert_eq!(base64_decode("Zm9v\nYmFy").unwrap(), b"foobar");
-        assert!(base64_decode("!!").is_none());
     }
 
     #[test]

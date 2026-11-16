@@ -94,10 +94,13 @@ mod tests {
     use super::*;
 
     fn temp_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "rpi-wechat-state-{}-{}",
+            "rpi-wechat-state-{}-{}-{}",
             std::process::id(),
-            rpi_hub_core::now_ms()
+            rpi_hub_core::now_ms(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

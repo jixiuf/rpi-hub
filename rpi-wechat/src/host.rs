@@ -209,9 +209,13 @@ impl Hub {
     }
 
     /// Claim the wechat lease (auto, when the plugin starts the bridge).
+    /// Claim the wechat lease AND record it in `self.lease` — the bridge
+    /// gate checks the recorded generation, so a claim without this bookkeeping
+    /// is fenced out on its first tick (the LeaseLost-on-startup bug).
     pub fn claim_wechat(&self) -> Result<Claim, String> {
         let now = now_ms();
-        self.store
+        let claim = self
+            .store
             .claim_lease(
                 "wechat",
                 &self.node_id,
@@ -220,7 +224,20 @@ impl Hub {
                 now,
                 self.config.lease.ttl_ms(),
             )
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        match &claim {
+            Claim::Granted {
+                generation,
+                expires_at,
+            } => {
+                *self.lease.lock().unwrap_or_else(|p| p.into_inner()) = Some(HeldLease {
+                    generation: *generation,
+                    expires_at: *expires_at,
+                });
+            }
+            Claim::Held { .. } => {}
+        }
+        Ok(claim)
     }
 
     /// Send text into this instance's agent lane (runtime action).
