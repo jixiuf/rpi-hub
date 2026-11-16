@@ -123,6 +123,9 @@ pub struct Hub {
     running: AtomicBool,
     /// Resolved at bind time; media tools read credentials via these getters.
     credentials: Mutex<Option<(String, String)>>,
+    /// Latest context_token from the last inbound message (media sendmessage
+    /// requires it; -2 = stale → retried without token by the caller).
+    context_token: Mutex<Option<String>>,
     /// The WeChat bridge may inject agent input / show notices.
     pub disabled: AtomicBool,
 }
@@ -167,6 +170,7 @@ impl Hub {
             lease: Mutex::new(None),
             user_id: Mutex::new(None),
             credentials: Mutex::new(None),
+            context_token: Mutex::new(None),
             outbound: Mutex::new(None),
             running: AtomicBool::new(false),
             disabled: AtomicBool::new(false),
@@ -309,6 +313,19 @@ impl Hub {
             return Ok(serde_json::Value::Null);
         }
         serde_json::from_str(&text).map_err(|e| format!("invalid action result: {e}"))
+    }
+
+    /// Refresh the shared context token (called on every authorized inbound).
+    pub fn set_context_token(&self, token: Option<&str>) {
+        *self.context_token.lock().unwrap_or_else(|p| p.into_inner()) =
+            token.map(str::to_string);
+    }
+
+    pub fn context_token(&self) -> Option<String> {
+        self.context_token
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Cache credentials for the outbound media tools.

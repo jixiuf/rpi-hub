@@ -34,6 +34,7 @@ pub async fn send_file(
     user_id: &str,
     path: &Path,
     is_image: bool,
+    context_token: Option<&str>,
 ) -> Result<String, IlinkError> {
     let bytes =
         std::fs::read(path).map_err(|e| IlinkError::Io(format!("read {}: {e}", path.display())))?;
@@ -109,10 +110,21 @@ pub async fn send_file(
             }
         })
     };
-    client
-        .send_media_message(user_id, None, serde_json::json!([item]))
-        .await?;
-    Ok(file_name)
+    // Media messages require a valid context_token (from the last inbound
+    // message); ret=-2 means stale — retried once without it.
+    match client
+        .send_media_message(user_id, context_token, serde_json::json!([item]))
+        .await
+    {
+        Ok(()) => Ok(file_name),
+        Err(IlinkError::Api { code: Some(-2), .. }) => {
+            client
+                .send_media_message(user_id, None, serde_json::json!([item]))
+                .await?;
+            Ok(file_name)
+        }
+        Err(other) => Err(other),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -177,11 +189,19 @@ fn drive_send(hub: &Arc<Hub>, path: PathBuf, is_image: bool) -> Result<String, S
     let client = crate::ilink::IlinkClient::new(&credentials.base_url, &credentials.token)
         .map_err(|e| e.to_string())?;
     host::log("outbound: client built");
+    let context_token = hub.context_token();
     let runtime = tokio_lite();
     let result = runtime.block_on(async move {
-        send_file(hub, &client, &user_id, &path, is_image)
-            .await
-            .map_err(|e| e.to_string())
+        send_file(
+            hub,
+            &client,
+            &user_id,
+            &path,
+            is_image,
+            context_token.as_deref(),
+        )
+        .await
+        .map_err(|e| e.to_string())
     });
     match &result {
         Ok(name) => host::log(&format!("outbound: send_file OK ({name})")),

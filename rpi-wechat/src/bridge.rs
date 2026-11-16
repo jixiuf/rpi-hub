@@ -194,6 +194,7 @@ pub async fn run(
                     }
                     if !incoming.context_token.is_empty() {
                         context_token = Some(incoming.context_token.clone());
+                        hub.set_context_token(Some(&incoming.context_token));
                     }
                     match incoming.kind.as_str() {
                         "text" => {
