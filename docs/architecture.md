@@ -43,6 +43,9 @@ kv(key PK, value)
 
 - `node_id = sha256(host ‖ cwd ‖ pid)[..16]`：**同一进程内跨 `/reload` 不变**（pid/cwd 不变），
   重启即变——正是租约需要的粒度。
+- **显示名 = 项目目录名**：`name@host` 直接表达"哪个项目在哪台机器"（如 `pi-hub@apmprod`、
+  `rpi-hub@ljmacjxf`）。`instanceName` 只是整机手动覆盖项，**默认不要设**——同机多个会话
+  全部同名只能靠 `-<pid>` 后缀区分，对使用者不可读；目录名天然区分。
 - `epoch`：每次插件加载生成一次，所有写都必须匹配，用来 fencing 旧加载遗留的线程。
 - `payload` 存整个信封 JSON：新增 kind 不需要迁移表结构。
 - WAL + `busy_timeout=3000` + `BEGIN IMMEDIATE`（读-改-写）处理多进程并发。

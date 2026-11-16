@@ -88,7 +88,7 @@ rpi install --path ./rpi-wechat      # 微信通道（下一步）
 ```json
 {
   "version": 1,
-  "instanceName": "home",
+  "instanceName": null,
   "lease": { "ttlSeconds": 20, "renewSeconds": 5, "resumeGraceSeconds": 10 },
   "remote": {
     "mode": "local",
@@ -104,7 +104,9 @@ rpi install --path ./rpi-wechat      # 微信通道（下一步）
 
 环境变量：`RPI_HUB_DIR`（状态目录）、`RPI_HUB_INSTANCE`（实例名）、`RPI_HUB_DEBUG=1`。
 
-实例名默认取项目目录名；同机重名自动加 `-<pid>`（重启后旧行过期即恢复原名）。
+**实例名默认 = 项目目录名（cwd basename）**，`name@host` 由此天然区分"哪个项目在哪台机器"。
+`instanceName` 是**整机手动覆盖**（一台机器通常不要设：同机多个 rpi 会话会全部同名，
+只能靠 `-<pid>` 后缀区分，对使用者不可读）。同项目同机多会话仍会自动加 `-<pid>`。
 `/use home` 匹配顺序：完整名 → `name@host` → 去 pid 后缀 → 唯一前缀。
 
 ## 跨机（办公室 ⇄ 服务器，不依赖 ssh）

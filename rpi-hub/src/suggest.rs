@@ -36,13 +36,8 @@ pub(crate) extern "C" fn suggest_arguments(
         let request = unsafe { request_json.as_str() };
         let payload =
             build_suggestions(request).unwrap_or_else(|| serde_json::json!({ "items": [] }));
-        let text = payload.to_string();
-        let written = StbString::from_string(text);
-        if std::env::var("RPI_HUB_DEBUG").ok().as_deref() == Some("1") {
-            host::log(&format!("suggest: writing out len={}", written.len));
-        }
         unsafe {
-            *out = written;
+            *out = StbString::from_string(payload.to_string());
         }
         0
     })
@@ -51,37 +46,12 @@ pub(crate) extern "C" fn suggest_arguments(
 /// Build the suggestion payload; `None` on any internal failure (the host
 /// renders an empty popup rather than an error while typing).
 fn build_suggestions(request: &str) -> Option<serde_json::Value> {
-    let dbg = std::env::var("RPI_HUB_DEBUG").ok().as_deref() == Some("1");
-    let value: serde_json::Value = match serde_json::from_str(request) {
-        Ok(v) => v,
-        Err(e) => {
-            if dbg { host::log(&format!("suggest: bad request {e}")); }
-            return None;
-        }
-    };
-    let command = match value.get("command").and_then(|v| v.as_str()) {
-        Some(c) => c.trim_start_matches('/'),
-        None => {
-            if dbg { host::log("suggest: missing command"); }
-            return None;
-        }
-    };
+    let value: serde_json::Value = serde_json::from_str(request).ok()?;
+    let command = value.get("command")?.as_str()?.trim_start_matches('/');
     let args = value.get("args").and_then(|v| v.as_str()).unwrap_or("");
 
-    let Some(hub) = host::current() else {
-        if dbg { host::log("suggest: no hub"); }
-        return None;
-    };
-    let Some(items) = cached_rows(&hub, args) else {
-        if dbg { host::log(&format!("suggest: no rows for {args:?}")); }
-        return None;
-    };
-    if dbg {
-        host::log(&format!(
-            "suggest: command={command} args={args:?} items={}",
-            items.len()
-        ));
-    }
+    let hub = host::current()?;
+    let items = cached_rows(&hub, args)?;
     Some(serde_json::json!({
         "items": items,
         "command": command,
@@ -156,8 +126,9 @@ fn cached_rows(hub: &std::sync::Arc<host::Hub>, query: &str) -> Option<Vec<serde
         }
     };
 
-    // Filter against value/name (`name@host`), the same keys the popup's fuzzy
-    // filter would match, so narrowing stays consistent.
+    // Prefix-narrow against value/name. Contains-matching would drop the row
+    // the user just completed (query equals its own value, which does not
+    // contain itself as a substring), breaking Up/Down navigation afterwards.
     let query = query.trim().to_ascii_lowercase();
     let items: Vec<serde_json::Value> = if query.is_empty() {
         all
@@ -166,7 +137,8 @@ fn cached_rows(hub: &std::sync::Arc<host::Hub>, query: &str) -> Option<Vec<serde
             .filter(|item| {
                 let value = item.get("value").and_then(|v| v.as_str()).unwrap_or("");
                 let label = item.get("label").and_then(|v| v.as_str()).unwrap_or("");
-                value.to_lowercase().contains(&query) || label.to_lowercase().contains(&query)
+                value.to_lowercase().starts_with(&query)
+                    || label.to_lowercase().contains(&query)
             })
             .collect()
     };
