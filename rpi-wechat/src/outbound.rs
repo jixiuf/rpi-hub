@@ -183,10 +183,10 @@ fn drive_send(_hub: &Arc<Hub>, path: PathBuf, is_image: bool) -> Result<String, 
             .await
             .map_err(|e| e.to_string())
     });
-    host::log(&format!(
-        "outbound: send_file result={}",
-        result.as_ref().map(|n| n.as_str()).unwrap_or("ERR")
-    ));
+    match &result {
+        Ok(name) => host::log(&format!("outbound: send_file OK ({name})")),
+        Err(error) => host::log(&format!("outbound: send_file FAILED: {error}")),
+    }
     result
 }
 
