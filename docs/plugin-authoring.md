@@ -39,8 +39,12 @@ rpi_plugin_sdk::export_plugin!(|api| {
 `register_flag`、`register_provider`、`register_streaming_provider`、
 `register_message_renderer`、`register_markdown_transformer`、`register_entry_renderer`、
 `register_event_handler`、`register_resources_discover`、`register_before_agent_start`、
-`register_oauth_provider(_cancellable)`、`register_tool_result`、`register_plugin_lifecycle`、
+`register_oauth_provider(_cancellable)`、`register_tool_result`、
+`register_argument_suggester`、`register_plugin_lifecycle`、
 `register_tool_prompt`、`runtime_action`、`declare`。
+
+`register_argument_suggester` 在 vtable 末尾追加，旧宿主永远读不到这个槽位：插件必须把
+`None` 当作"此宿主不支持参数建议"，静默降级。
 
 ## 3. 线程模型（最容易踩的坑）
 
@@ -50,6 +54,7 @@ rpi_plugin_sdk::export_plugin!(|api| {
 | 工具 `poll` | 同上（循环驱动） | 单次必须快 | 非阻塞地推进状态；`partial_cb` 同步调用 |
 | 事件 handler | host blocking 线程 | 5s/10s/15s | **只入队**，不要 IO |
 | 斜杠命令 handler | **TUI 线程** | 人感知的"瞬间" | 几条 SQL；长任务丢 worker |
+| 参数建议 handler | 宿主的建议 worker 线程 | 500ms，超时即弃 | 见 §3.5；保持便宜、重度缓存 |
 | `before_agent_start` | 请求前 | — | 返回替换后的 systemPrompt |
 | 生命周期 begin/finish | host 清理线程 | finish 决定能否卸载 | 停线程、flush；finish 后不能再有回调 |
 
@@ -58,6 +63,34 @@ rpi_plugin_sdk::export_plugin!(|api| {
 - `src/worker.rs`：一个专用 `std::thread`，负责心跳、信箱派发、租约续期、清理。
 - `src/events.rs`：只翻 `AtomicBool` / 压一个待回复队列。
 - `src/commands.rs`：只做微秒级 SQLite 语句，返回 `{kind:"message",text}`。
+
+## 3.5 参数建议（`register_argument_suggester`）
+
+给斜杠命令注册参数候选（如 `/msg <实例>`），TUI 在参数区打字时弹补全。契约是**全量候选列表**：
+
+- 宿主永远用 `{"command":"/msg","args":""}` 调用，按**命令名**缓存返回的完整列表，
+  按输入前缀的收窄在宿主本地做。不要在插件里按 `args` 过滤——宿主的缓存是按命令存的，
+  过滤过的列表会让用户删字符时丢候选。
+- 每条路径恰好释放一次返回字符串（宿主拷贝后用你注册的 `plugin_free_string` 回收）。
+- 响应上限：宿主拒绝超过 64 KiB 的响应，解析后最多 64 项、每字段 256 字符；插件自己也
+  该设上限（本仓库 `suggest.rs`：32 项、256 字符）。
+- 宿主侧每个命令同时至多一个调用在飞，刷新窗口内不重复调用，所以实现可以假定"便宜 +
+  可缓存"：本仓库缓存实例列表 2s（心跳 3s 才变一次），client 模式下一次刷新就是一次 relay
+  往返。
+
+```rust
+extern "C" fn suggest_arguments(
+    request_json: StbStringRef,
+    out: *mut StbString,
+    _ud: *mut c_void,
+) -> i32 {
+    rpi_plugin_sdk::guard_or(1, || {
+        let payload = build_full_list().unwrap_or_else(|| serde_json::json!({ "items": [] }));
+        unsafe { *out = StbString::from_string(payload.to_string()); }
+        0
+    })
+}
+```
 
 ## 4. 工具四段式生命周期
 

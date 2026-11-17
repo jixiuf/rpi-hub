@@ -5,16 +5,17 @@ rpi 的多实例协同：实例发现、互相发消息/指令、任务委派，
 设计目标来自实际用法：**一台办公机 + 一台服务器，办公机能 ssh 到服务器，反过来不行**；两台机器
 网络/环境不同，部分调研必须交给位于对应网络里的实例完成；微信同一时刻只能接一个实例，但接管者要能切换。
 
-当前状态：**本地多实例 + 跨机 relay（自研 TCP/HTTP + token 鉴权，不依赖 ssh）已在真机验证**；微信通道是下一步。
+当前状态：**本地多实例 + 跨机 relay（自研 TCP/HTTP + token 鉴权，不依赖 ssh）已在真机验证**；微信文字通道已上线，下一步是媒体收发。
 
 ```
-~/repos/rpi-hub/
+rpi-hub/
 ├── rpi-hub-core/   # 共享库：身份、SQLite store、租约、信封协议、relay wire（无 ABI）
 ├── rpi-hub/        # cdylib 插件：tools / 斜杠命令 / 事件 / 后台 worker / ssh 远端一次性任务
-└── rpi-wechat/     # cdylib 插件：iLink 通道（下一步）
+└── rpi-wechat/     # cdylib 插件：微信文字通道（iLink，QR 登录）
 ```
 
-> dots 里的 `~/vmacs/dots/rpi/agent/extensions` 是这份仓库的镜像（开发副本），正式源码以本仓库为准。
+> 个人 dots 配置里如果镜像了这份仓库（如 `~/vmacs/dots/rpi/agent/extensions`），那是开发副本；
+> 正式源码以本仓库为准。
 
 ## 核心设计（与 pi-hub 的差异）
 
@@ -26,14 +27,14 @@ rpi 的多实例协同：实例发现、互相发消息/指令、任务委派，
 | `/reload` | 旧闭包可能继续跑 | 每次加载生成新 epoch，旧 epoch 写入被拒；租约按 `node_id` 原地续约 |
 | 远程指令 | 注入 `/__hub_reload` 让模型回合去 dispatch | 直接映射 host runtime action（`NewSession/Fork/Reload/…`） |
 | 任务结果回传 | `tasks.json` + `[TASK#N结果]` 文本约定 | correlation id + `TurnEnd`/`MessageEnd` 回包 |
-| 跨机 | SSH 轮询远程实例 + 远程 takeover 文件 | relay（token 鉴权，可选 HTTP 前门模式）+ `hub_run`（ssh 一次性任务） |
+| 跨机 | SSH 轮询远程实例 + 远程 takeover 文件 | relay（token 鉴权，RPC 走 HTTP 表单端口）+ `hub_run`（ssh 一次性任务） |
 
 因此这里没有 daemon、没有本地端口（单机时）、没有文件锁代码。
 
 ## 安装
 
 ```bash
-cd ~/repos/rpi-hub
+cd <本仓库目录>
 
 # 开发：编译 + watch + 热重载（多包 workspace 需要 -P）
 rpi dev -P rpi-hub
@@ -41,14 +42,15 @@ rpi dev-local -P rpi-hub      # 只加载本扩展，隔离调试
 
 # 安装到全局 ~/.rpi/agent/extensions
 rpi install --path ./rpi-hub
-rpi install --path ./rpi-wechat      # 微信通道（下一步）
+rpi install --path ./rpi-wechat      # 微信文字通道
 ```
 
 > rpi 0.23 的 `install --path` 在 cargo 1.100 下有兼容 bug（找不到 build 输出目录）。
 > 已在 pi-rust main 修复（7697ca8）。0.23 上手动安装：
 > ```bash
 > cargo build --release -p rpi-hub
-> cp target/release/librpi_hub.dylib ~/.rpi/agent/extensions/   # macos；linux 是 .so
+> rm ~/.rpi/agent/extensions/librpi_hub.dylib   # macos 上务必先删旧文件再拷贝：
+> cp target/release/librpi_hub.dylib ~/.rpi/agent/extensions/   # 原地覆盖同一文件会让新进程映射到旧的签名页缓存，直接 SIGKILL；linux 是 .so，无此问题
 > ```
 
 ## 工具（给模型用）
@@ -142,10 +144,10 @@ rpi install --path ./rpi-wechat      # 微信通道（下一步）
 
 （token 文件两端一致：0600，内容为 32 位 hex；没有文件时 relay 生成，需要手动同步一次到 client。）
 
-- **裸模式**（`http` 缺省/false）：行分隔 JSON-RPC，首帧必须 `authenticate {token}`。
-- **HTTP 前门模式**（`"http": true`）：防火墙通常只放行"转发到真实 HTTP 服务"的端口。此时 relay
-  应答 `POST /hub-rpc`（token 在 `X-Hub-Auth` 头，一个请求一次 RPC），其它路径一律 404——
-  同端口的真实服务不受影响，也可以让 nginx 按路径把 `/hub-rpc` 反代到本机 relay。
+relay 有两种线上格式：
+
+- **直连 JSON-RPC**（`http` 缺省/false）：行分隔 JSON-RPC，首帧必须 `authenticate {token}`。适合端口两端都是自己人（本机 unix socket、ssh 隧道对端）。
+- **HTTP 表单端口**（`"http": true`）：公司防火墙往往只放行“转发到真实 HTTP 服务”的端口，端口探活会拒绝纯 TCP 服务。这时 relay 改用 HTTP 应答：`POST /hub-rpc`（token 在 `X-Hub-Auth` 头，一个请求一次 RPC），其它路径一律 404。同端口的真实服务不受影响，也可以让 nginx 按路径把 `/hub-rpc` 反代到本机 relay。
 - 鉴权：token 文件 0600、常数时间比较、Debug 打印 `Token(***)`、日志/错误不落明文。
 - `listen` 绑定非回环地址时启动日志给出警告（token 是唯一防线）。
 - client 断线指数退避重连（1→15s）并自动重新认证；调用失败重试一次。
@@ -153,23 +155,32 @@ rpi install --path ./rpi-wechat      # 微信通道（下一步）
 - 两机的 `hub.db` 只有一份（在 relay 侧）：办公室节点的 presence/租约/信箱都通过连接读写。
 - 完全不依赖 ssh（`sshHost/remoteSocket/localSocket` 配置会报错提示迁移）。
 
+## TUI 参数建议
+
+`/msg` `/cmd` `/ask` `/use` 都注册了参数建议：在参数区打字时，补全弹窗会按输入的前缀收窄出
+实例名（`name@host`，标注 当前/微信/忙）。列表由插件全量提供（最多 32 项），收窄在宿主本地做，
+所以删掉几个字符就能找回候选，不依赖插件。需要宿主支持 `register_argument_suggester`
+（pi-rust PR #338）；旧宿主上这个功能静默关闭，其余不受影响。
+
 ## 验证
 
 ```bash
 cargo test                          # 45 core 单测（租约 fencing、并发抢占、信箱、relay/token/auth、HTTP 模式…）
-                                    # + 7 plugin 单测（ssh 计划注入面、事件文本提取）
+                                    # + 10 plugin 单测（ssh 计划注入面、事件文本提取、参数建议上限）
 scripts/smoke.sh                    # 真 rpi 单机：两个实例注册、重名处理、唯一租约、/instances、/use
 RELAY_PORT=8085 scripts/smoke-relay.sh HOST   # 真机跨机：relay(tmux, http:true) + 本机 client
 ```
 
 `smoke-relay.sh` 在无法 ssh 到目标机时自动 skip；已实测 apmprod:8085（防火墙可直连的端口）。
+`scripts/smoke.sh` 目前会失败：wechat 插件现在也自注册 `*-wechat` 实例行，每进程两行，
+脚本的实例数断言还没跟上（b085e57 引入，待修脚本）。
 
 ## 状态
 
 - ✅ 多实例协调（presence / 信箱 / 租约 fencing）
-- ✅ 跨机 relay（TCP+token，可选 HTTP 前门模式）
+- ✅ 跨机 relay（TCP+token，RPC 可跑在 HTTP 表单端口上）
 - ✅ rpi-wechat 文字通道（QR 登录、收发、分块回复、租约门控）
-- ✅ TUI 参数建议（`register_argument_suggester`，pi-rust PR #338 待合并）
+- ✅ TUI 参数建议（`register_argument_suggester`，pi-rust PR #338 已实装，待合并）
 - ⬜ 媒体收发（代码已有：`media.rs` + `send_image/file_to_wechat` 工具；待真机验证）
 - ⬜ `/sessions` `/goto`、`/start`（tmux 拉起实例）、隔离委派
 
