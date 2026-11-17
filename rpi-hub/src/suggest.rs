@@ -1,16 +1,27 @@
 //! Argument suggestions for `/msg` `/cmd` `/ask` `/use`.
 //!
-//! Called by the host TUI on a blocking thread with a bounded budget per
-//! keystroke, so this must stay cheap: for client-mode hubs one keystroke
-//! would otherwise cost a relay round-trip (~150 ms), so the instance list is
-//! cached for 2 s (instance presence changes on the 3 s heartbeat cadence —
-//! one lookup per cache window is plenty).
+//! Contract (pi-rust PR #338, **full-candidate-list mode**): the host caches
+//! the response **per command** and narrows it locally against the typed
+//! prefix on every keystroke, so rpi-hub returns the FULL instance list and
+//! ignores the request's `args` field (`{"command":"/msg","args":"ap"}`).
+//! Filtering here would poison the host's per-command cache: after the user
+//! types `ap`, deleting a character could not restore candidates the filtered
+//! frame no longer contains.
 //!
-//! Contract (host side, `register_argument_suggester`):
 //! - request: `{"command":"/msg","args":"ap"}` — `args` is the parameter text
-//!   typed so far, without the command token
+//!   typed so far, without the command token; accepted but not filtered on
+//!   (see above)
 //! - response: `{"items":[{"value","label","description"}]}` — `value` is what
 //!   the completion inserts (`name@host`, the token `/msg` and friends accept)
+//! - caps: at most [`MAX_ITEMS`] items, each field at most [`MAX_FIELD_CHARS`]
+//!   characters, truncated with `…` — size limits are enforced here, before
+//!   the payload crosses the ABI (the host re-checks its own byte budget, but
+//!   the plugin must not rely on it).
+//!
+//! The instance list is cached for 2 s (presence changes on the 3 s heartbeat
+//! cadence; for client-mode hubs a refresh costs a relay round-trip), so the
+//! host's background refresh pays the round-trip at most once per cache
+//! window. Typing itself never waits on this handler.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -48,20 +59,20 @@ pub(crate) extern "C" fn suggest_arguments(
 fn build_suggestions(request: &str) -> Option<serde_json::Value> {
     let value: serde_json::Value = serde_json::from_str(request).ok()?;
     let command = value.get("command")?.as_str()?.trim_start_matches('/');
-    let args = value.get("args").and_then(|v| v.as_str()).unwrap_or("");
 
     let hub = host::current()?;
-    let items = cached_rows(&hub, args)?;
+    let items = cap_rows(cached_rows(&hub)?);
     Some(serde_json::json!({
         "items": items,
         "command": command,
     }))
 }
 
-/// Cached instance rows (label/value/description triples, pre-filtered by the
-/// current argument text). The cache holds the *unfiltered* rows so a
-/// keystroke never pays for a relay round-trip; filtering is free.
-fn cached_rows(hub: &std::sync::Arc<host::Hub>, query: &str) -> Option<Vec<serde_json::Value>> {
+/// Cached instance rows (label/value/description triples, **unfiltered** —
+/// the full candidate list; the host narrows against the typed prefix
+/// locally, per keystroke). The cache holds the full list so the host's
+/// background refresh pays the relay round-trip at most once per 2 s window.
+fn cached_rows(hub: &std::sync::Arc<host::Hub>) -> Option<Vec<serde_json::Value>> {
     struct Rows {
         payload: Vec<serde_json::Value>,
         at: i64,
@@ -126,23 +137,45 @@ fn cached_rows(hub: &std::sync::Arc<host::Hub>, query: &str) -> Option<Vec<serde
         }
     };
 
-    // Prefix-narrow against value/name. Contains-matching would drop the row
-    // the user just completed (query equals its own value, which does not
-    // contain itself as a substring), breaking Up/Down navigation afterwards.
-    let query = query.trim().to_ascii_lowercase();
-    let items: Vec<serde_json::Value> = if query.is_empty() {
-        all
-    } else {
-        all.into_iter()
-            .filter(|item| {
-                let value = item.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                let label = item.get("label").and_then(|v| v.as_str()).unwrap_or("");
-                value.to_lowercase().starts_with(&query)
-                    || label.to_lowercase().contains(&query)
+    // No prefix filtering here (full-candidate-list mode): the host caches by
+    // command and narrows locally. Filtering on `args` plugin-side would
+    // poison that per-command cache — after typing `ap`, deleting a character
+    // could not restore candidates the filtered frame no longer contains.
+    (!all.is_empty()).then_some(all)
+}
+
+/// Response caps (review: size limits must be enforced before the payload
+/// crosses the ABI; the host re-checks its own byte budget, but the plugin
+/// must not rely on it).
+const MAX_ITEMS: usize = 32;
+/// Per-field character cap (labels embed cwd paths and CJK text, so count
+/// chars, not bytes); longer fields are truncated with `…`.
+const MAX_FIELD_CHARS: usize = 256;
+
+/// Enforce the response caps: at most [`MAX_ITEMS`] rows, every field at most
+/// [`MAX_FIELD_CHARS`] characters. Pure, so the caps are regression-tested
+/// without a live hub.
+fn cap_rows(items: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    items
+        .into_iter()
+        .take(MAX_ITEMS)
+        .map(|item| {
+            let field = |key: &str| item.get(key).and_then(|v| v.as_str()).map(truncate_field);
+            serde_json::json!({
+                "value": field("value").unwrap_or_default(),
+                "label": field("label"),
+                "description": field("description"),
             })
-            .collect()
-    };
-    (!items.is_empty()).then_some(items)
+        })
+        .collect()
+}
+
+fn truncate_field(text: &str) -> String {
+    if text.chars().count() <= MAX_FIELD_CHARS {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(MAX_FIELD_CHARS).collect();
+    format!("{cut}…")
 }
 
 #[cfg(test)]
@@ -154,5 +187,45 @@ mod tests {
         assert!(build_suggestions("not json").is_none());
         assert!(build_suggestions("{}").is_none());
         assert!(build_suggestions(r#"{"command":"/msg"}"#).is_none());
+    }
+
+    #[test]
+    fn caps_enforce_item_and_field_limits() {
+        let many: Vec<serde_json::Value> = (0..40)
+            .map(|i| serde_json::json!({"value": format!("inst{i}@h"), "label": i}))
+            .collect();
+        assert_eq!(cap_rows(many).len(), MAX_ITEMS);
+
+        // A >MAX_FIELD_CHARS CJK value is truncated on char boundaries with an
+        // ellipsis marker, never mid-codepoint.
+        let rows = vec![serde_json::json!({
+            "value": "值".repeat(MAX_FIELD_CHARS + 50),
+            "label": "x",
+        })];
+        let capped = cap_rows(rows);
+        let value = capped[0].get("value").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(value.chars().count(), MAX_FIELD_CHARS + 1); // + `…`
+        assert!(value.ends_with('…'));
+    }
+
+    #[test]
+    fn short_fields_pass_through_cap_rows_unharmed() {
+        let rows = vec![serde_json::json!({
+            "value": "apmprod@h",
+            "label": "1. apmprod（微信）",
+            "description": "/export/home/jixiuf",
+        })];
+        let capped = cap_rows(rows);
+        assert_eq!(capped.len(), 1);
+        let row = &capped[0];
+        assert_eq!(row.get("value").and_then(|v| v.as_str()), Some("apmprod@h"));
+        assert_eq!(
+            row.get("label").and_then(|v| v.as_str()),
+            Some("1. apmprod（微信）")
+        );
+        assert_eq!(
+            row.get("description").and_then(|v| v.as_str()),
+            Some("/export/home/jixiuf")
+        );
     }
 }
