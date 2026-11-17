@@ -194,7 +194,12 @@ pub async fn run(
     ctx: BridgeContext,
     runtime: Arc<tokio::runtime::Runtime>,
 ) -> StopReason {
-    let mut cursor = ctx.cursor.clone();
+    // Shared cursor from the DB: a hand-off mid-poll never replays or splits
+    // messages, because whoever polls next continues from the advanced cursor.
+    let mut cursor = hub.store
+        .get_cursor()
+        .or(Some(ctx.cursor.clone()))
+        .unwrap_or_default();
     let mut seen: HashSet<String> = HashSet::new();
     let mut context_token: Option<String> = None;
     let mut typing_ticket: Option<String> = None;
@@ -204,6 +209,7 @@ pub async fn run(
 
     loop {
         if hub.shutdown.requested() {
+            hub.abort_renew_task();
             return StopReason::Shutdown;
         }
 
@@ -260,6 +266,7 @@ pub async fn run(
         match ctx.client.get_updates(&cursor).await {
             Ok(page) => {
                 cursor = page.cursor;
+                hub.store.set_cursor(&cursor);
                 crate::state::save_cursor(&hub.dir, &cursor);
                 for raw in &page.msgs {
                     let Some(incoming) = ilink::normalize_msg(raw) else {
@@ -429,6 +436,7 @@ pub async fn run(
             }
             Err(error) => {
                 if error.is_session_expired() {
+                    hub.abort_renew_task();
                     hub.record_error("wechat: session expired; run /wechat login");
                     return StopReason::SessionExpired;
                 }

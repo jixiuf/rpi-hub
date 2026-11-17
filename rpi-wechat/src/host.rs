@@ -128,6 +128,8 @@ pub struct Hub {
     context_token: Mutex<Option<String>>,
     /// The WeChat bridge may inject agent input / show notices.
     pub disabled: AtomicBool,
+    /// Abort handle for the bridge's lease-renewal task.
+    renew_task: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 impl std::fmt::Debug for Hub {
@@ -171,6 +173,7 @@ impl Hub {
             user_id: Mutex::new(None),
             credentials: Mutex::new(None),
             context_token: Mutex::new(None),
+            renew_task: Mutex::new(None),
             outbound: Mutex::new(None),
             running: AtomicBool::new(false),
             disabled: AtomicBool::new(false),
@@ -416,6 +419,17 @@ impl Hub {
     }
 
     /// Refresh the shared context token (called on every authorized inbound).
+    /// Register the lease-renewal task's abort handle (bridge startup).
+    pub fn set_renew_task(&self, handle: tokio::task::AbortHandle) {
+        *self.renew_task.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
+    }
+
+    pub fn abort_renew_task(&self) {
+        if let Some(handle) = self.renew_task.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            handle.abort();
+        }
+    }
+
     pub fn set_context_token(&self, token: Option<&str>) {
         *self.context_token.lock().unwrap_or_else(|p| p.into_inner()) = token.map(str::to_string);
     }

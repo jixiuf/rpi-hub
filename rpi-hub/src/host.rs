@@ -402,11 +402,24 @@ impl Hub {
         let names: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
         match names::resolve(query, names.iter().copied()) {
             Ok(Some(index)) => Ok(instances[index].clone()),
-            Ok(None) => Err(format!(
-                "no instance matches {query:?}; running: {}",
-                labels.join(", ")
-            )),
-            Err(count) => Err(format!("{query:?} is ambiguous ({count} instances match)")),
+            Ok(None) | Err(_) => {
+                // Fallback: the query may come from a Tab completion frame
+                // captured before the target restarted (its name gained a
+                // -<pid> suffix). Match on the base name (suffix stripped),
+                // requiring a unique hit.
+                let query_base = names::base_name(query);
+                let base_matches: Vec<&InstanceView> = instances
+                    .iter()
+                    .filter(|i| names::base_name(&i.name) == query_base)
+                    .collect();
+                match base_matches.len() {
+                    1 => Ok(base_matches[0].clone()),
+                    _ => Err(format!(
+                        "no instance matches {query:?}; running: {}",
+                        labels.join(", ")
+                    )),
+                }
+            }
         }
     }
 

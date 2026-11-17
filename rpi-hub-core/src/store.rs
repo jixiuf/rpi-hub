@@ -767,6 +767,28 @@ impl Store {
         Ok(generation)
     }
 
+    /// Shared getupdates cursor (cross-instance: whoever polls advances it,
+    /// so a hand-off mid-poll never replays or splits messages).
+    pub fn get_cursor(&self) -> Option<String> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.query_row("SELECT value FROM kv WHERE key='wechat_cursor'", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_cursor(&self, cursor: &str) {
+        if let Ok(conn) = self.conn.lock() {
+            let _ = conn.execute(
+                "INSERT INTO kv(key, value) VALUES ('wechat_cursor', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = ?1",
+                params![cursor],
+            );
+        }
+    }
+
     /// Drop a lease this process owns (`/wechat stop`).
     pub fn release_lease(
         &self,

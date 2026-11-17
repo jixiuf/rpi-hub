@@ -102,6 +102,7 @@ extern "C" fn lifecycle_begin(_user_data: *mut std::ffi::c_void) {
 extern "C" fn lifecycle_finish(_user_data: *mut std::ffi::c_void) -> i32 {
     if let Some(hub) = host::current() {
         hub.request_shutdown();
+        hub.abort_renew_task();
         hub.stop_thread();
         // Release the wechat lease on exit: otherwise it lingers for the TTL
         // (20s) showing a dead instance as the channel owner in /instances,
