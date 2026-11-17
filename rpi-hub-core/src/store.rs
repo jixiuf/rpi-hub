@@ -250,6 +250,12 @@ impl Store {
 
     fn configure(conn: &Connection) -> Result<()> {
         conn.busy_timeout(Duration::from_millis(3_000))?;
+        // WAL + synchronous=FULL: multiple plugin processes (rpi-hub,
+        // rpi-wechat) share this database across frequent hard exits (TUI
+        // restarts, SIGKILL). NORMAL can leave torn WAL frames on abrupt
+        // death; FULL makes every commit durable so a kill never corrupts
+        // the database (writes are low-frequency — the cost is negligible).
+        conn.pragma_update(None, "synchronous", "FULL")?;
         // WAL is what makes concurrent readers/writers from several plugin
         // processes safe; `memory` is returned for the in-memory test store.
         // Skip the switch when it is already on: the pragma needs a brief
