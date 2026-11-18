@@ -18,6 +18,7 @@ pub mod config;
 pub mod error;
 pub mod lease;
 pub mod names;
+pub mod render;
 pub mod paths;
 pub mod protocol;
 pub mod status;

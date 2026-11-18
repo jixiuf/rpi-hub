@@ -475,62 +475,21 @@ impl Hub {
     /// Human-readable `/instances` output, shared by the tool and the command.
     pub fn format_instances(&self, now: i64) -> Result<String, String> {
         let instances = self.instances(now)?;
-        if instances.is_empty() {
-            return Ok("没有登记的实例".to_string());
-        }
         let holder = self
             .lease_observer
             .holder("wechat")
             .map_err(|e| e.to_string())?
             .filter(|h| h.expires_at > now);
-        let mut lines = Vec::with_capacity(instances.len() + 2);
-        lines.push("实例列表：".to_string());
-        for (index, instance) in instances.iter().enumerate() {
-            let mut marks: Vec<&str> = Vec::new();
-            if instance.node_id == self.node_id {
-                marks.push("当前");
-            }
-            if instance.role == "subagent" {
-                marks.push("subagent");
-            }
-            if holder
-                .as_ref()
-                .is_some_and(|h| h.owner_node == instance.node_id)
-            {
-                marks.push("微信");
-            }
-            if let Some(title) = instance.title.as_deref().filter(|t| !t.is_empty()) {
-                marks.push(title);
-            }
-            let busy = if instance.busy { " 忙" } else { "" };
-            let mark = if marks.is_empty() {
-                String::new()
-            } else {
-                format!("（{}）", marks.join("，"))
-            };
-            lines.push(format!(
-                "{}. {}{}{}{}",
-                index + 1,
-                instance.label(),
-                mark,
-                busy,
-                if instance.cwd.is_empty() {
-                    String::new()
-                } else {
-                    format!("  {}", instance.cwd)
-                }
-            ));
-        }
-        match holder {
-            Some(holder) => lines.push(format!(
-                "微信接管: {}（generation {}，剩余 {}s）",
-                holder.owner_name,
-                holder.generation,
-                (holder.expires_at - now) / 1000
-            )),
-            None => lines.push("微信接管: (无)".to_string()),
-        }
-        Ok(lines.join("\n"))
+        let holder_node = holder.as_ref().map(|h| h.owner_node.clone());
+        let viewer = rpi_hub_core::render::RenderContext {
+            viewer_node_id: &self.node_id,
+            wechat_holder_node: holder_node.as_deref(),
+            remote: !matches!(self.config.remote.mode, rpi_hub_core::config::RemoteMode::Local),
+        };
+        let holder_triple = holder.map(|h| (h.owner_name, h.generation, h.expires_at));
+        Ok(rpi_hub_core::render::render_instances_text(
+            &instances, &viewer, now, holder_triple,
+        ))
     }
 
     /// Send an envelope to a resolved target (self-targets short-circuit).
