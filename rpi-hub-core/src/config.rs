@@ -189,14 +189,69 @@ pub enum SpawnMode {
     /// `tmux new-session -d` (the default) — crash-visible, attachable.
     #[default]
     Tmux,
+    /// A new WINDOW inside the CURRENT tmux session (requires the host rpi
+    /// process to run inside tmux; falls back to a new session when $TMUX is
+    /// absent).
+    CurrentSession,
     /// `/start` disabled on this machine.
     None,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceSpawnConfig {
     pub mode: SpawnMode,
+    /// tmux session-name prefix (`rpi-<base>` → `<prefix>-<base>`).
+    #[serde(default = "default_session_prefix")]
+    pub session_prefix: String,
+    /// The command a new instance runs. A string is a single program; an
+    /// array is program + arguments (e.g. `["rpi", "--model", "sonnet"]`).
+    #[serde(default = "default_spawn_command")]
+    pub command: SpawnCommand,
+    /// The tmux binary path (self-compiled or non-PATH installs).
+    #[serde(default = "default_tmux_command")]
+    pub tmux_command: String,
+}
+
+fn default_session_prefix() -> String {
+    "rpi".to_string()
+}
+
+fn default_spawn_command() -> SpawnCommand {
+    SpawnCommand::Simple("rpi".to_string())
+}
+
+fn default_tmux_command() -> String {
+    "tmux".to_string()
+}
+
+/// The new instance's command line: a bare program, or program + arguments.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SpawnCommand {
+    Simple(String),
+    Args(Vec<String>),
+}
+
+impl SpawnCommand {
+    /// The argv for the new instance (empty program is an error upstream).
+    pub fn argv(&self) -> Vec<String> {
+        match self {
+            SpawnCommand::Simple(program) => vec![program.clone()],
+            SpawnCommand::Args(argv) => argv.clone(),
+        }
+    }
+}
+
+impl Default for InstanceSpawnConfig {
+    fn default() -> Self {
+        Self {
+            mode: SpawnMode::default(),
+            session_prefix: default_session_prefix(),
+            command: default_spawn_command(),
+            tmux_command: default_tmux_command(),
+        }
+    }
 }
 
 impl InstanceSpawnConfig {
@@ -204,6 +259,7 @@ impl InstanceSpawnConfig {
     pub fn mode_label(&self) -> &'static str {
         match self.mode {
             SpawnMode::Tmux => "tmux",
+            SpawnMode::CurrentSession => "current",
             SpawnMode::None => "none",
         }
     }

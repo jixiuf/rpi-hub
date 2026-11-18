@@ -56,31 +56,85 @@ fn session_base(cwd: &Path) -> String {
     }
 }
 
-fn session_exists(name: &str) -> bool {
-    Command::new("tmux")
+fn session_exists(tmux: &str, name: &str) -> bool {
+    Command::new(tmux)
         .args(["has-session", "-t", name])
         .output()
         .map(|out| out.status.success())
         .unwrap_or(false)
 }
 
-/// First free tmux session name: `rpi-<base>`, `rpi-<base>-2`, …
-fn next_session_name(base: &str) -> String {
-    let candidate = format!("rpi-{base}");
-    if !session_exists(&candidate) {
+/// First free tmux session name: `<prefix>-<base>`, `<prefix>-<base>-2`, …
+fn next_session_name(prefix: &str, tmux: &str, base: &str) -> String {
+    let candidate = format!("{prefix}-{base}");
+    if !session_exists(tmux, &candidate) {
         return candidate;
     }
     for n in 2..=99 {
-        let candidate = format!("rpi-{base}-{n}");
-        if !session_exists(&candidate) {
+        let candidate = format!("{prefix}-{base}-{n}");
+        if !session_exists(tmux, &candidate) {
             return candidate;
         }
     }
-    format!("rpi-{base}-{}", std::process::id())
+    format!("{prefix}-{base}-{}", std::process::id())
 }
 
-fn spawn_tmux(session: &str, cwd: &Path) -> Result<(), String> {
-    let status = Command::new("tmux")
+/// Where the new instance lands.
+enum Placement {
+    /// A new window inside the host process's existing tmux session.
+    Window(String),
+    /// A dedicated detached session.
+    Session(String),
+}
+
+/// The current tmux session name, from `$TMUX` (absent outside tmux).
+fn current_session(tmux: &str) -> Result<String, String> {
+    if std::env::var("TMUX").map(|v| v.is_empty()).unwrap_or(true) {
+        return Err("不在 tmux 中（$TMUX 缺失）".to_string());
+    }
+    let output = Command::new(tmux)
+        .args(["display-message", "-p", "-F", "#{session_name}"])
+        .output()
+        .map_err(|error| format!("cannot run {tmux}: {error}"))?;
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() {
+        return Err("session name 为空".to_string());
+    }
+    Ok(name)
+}
+
+/// A new window in an EXISTING session. Window name = the basename (the
+/// running rpi does not rename windows, verified with allow-rename on).
+fn spawn_window(
+    tmux: &str,
+    command: &[String],
+    session: &str,
+    base: &str,
+    cwd: &Path,
+) -> Result<(), String> {
+    let status = Command::new(tmux)
+        .args([
+            "new-window",
+            "-d",
+            "-t",
+            session,
+            "-n",
+            base,
+            "-c",
+            &cwd.to_string_lossy(),
+        ])
+        .args(command)
+        .status()
+        .map_err(|error| format!("cannot run {tmux}: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{tmux} new-window exited with {status}"))
+    }
+}
+
+fn spawn_tmux(tmux: &str, command: &[String], session: &str, cwd: &Path) -> Result<(), String> {
+    let status = Command::new(tmux)
         .args([
             "new-session",
             "-d",
@@ -88,14 +142,14 @@ fn spawn_tmux(session: &str, cwd: &Path) -> Result<(), String> {
             session,
             "-c",
             &cwd.to_string_lossy(),
-            "rpi",
         ])
+        .args(command)
         .status()
-        .map_err(|error| format!("cannot run tmux: {error}"))?;
+        .map_err(|error| format!("cannot run {tmux}: {error}"))?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("tmux new-session exited with {status}"))
+        Err(format!("{tmux} new-session exited with {status}"))
     }
 }
 
@@ -112,8 +166,8 @@ pub struct SpawnContext<'a> {
     pub spawn: &'a crate::config::InstanceSpawnConfig,
 }
 
-fn which_tmux() -> bool {
-    Command::new("tmux")
+fn which_tmux(tmux: &str) -> bool {
+    Command::new(tmux)
         .arg("-V")
         .output()
         .map(|out| out.status.success())
@@ -136,7 +190,7 @@ fn expand_home(arg: &str) -> String {
 /// `/start [cwd]`: launch a new instance and confirm via the presence table.
 pub fn start(ctx: &SpawnContext<'_>, cwd_arg: Option<&str>) -> Result<String, String> {
     match ctx.spawn.mode {
-        SpawnMode::Tmux => {}
+        SpawnMode::Tmux | SpawnMode::CurrentSession => {}
         SpawnMode::None => {
             return Err("本机配置禁用了 /start（instanceSpawn.mode = none）".to_string())
         }
@@ -155,14 +209,43 @@ pub fn start(ctx: &SpawnContext<'_>, cwd_arg: Option<&str>) -> Result<String, St
         }
         None => PathBuf::from(&ctx.cwd),
     };
-    if !which_tmux() {
-        return Err("tmux 不可用：/start 需要 tmux".to_string());
+    let tmux = &ctx.spawn.tmux_command;
+    if !which_tmux(tmux) {
+        return Err(format!("tmux 不可用（{tmux} -V 失败）：/start 需要 tmux"));
     }
 
+    let argv = ctx.spawn.command.argv();
+    if argv.is_empty() || argv[0].trim().is_empty() {
+        return Err("instanceSpawn.command 不能为空".to_string());
+    }
     let base = session_base(&cwd);
-    let session = next_session_name(&base);
     let before = rows(ctx)?;
-    spawn_tmux(&session, &cwd)?;
+    // Two placements: a WINDOW in the current session (mode=current, requires
+    // $TMUX — falls back to a dedicated session), or a dedicated session.
+    let placement = match ctx.spawn.mode {
+        SpawnMode::CurrentSession => {
+            current_session(tmux).map(|session| Placement::Window(session))
+        }
+        _ => Ok(Placement::Session(next_session_name(
+            &ctx.spawn.session_prefix,
+            tmux,
+            &base,
+        ))),
+    };
+    let placement = placement.map_err(|e| format!("tmux 会话探测失败: {e}"))?;
+    match &placement {
+        Placement::Window(session) => spawn_window(tmux, &argv, session, &base, &cwd)?,
+        Placement::Session(session) => spawn_tmux(tmux, &argv, session, &cwd)?,
+    }
+    let placement_label = match &placement {
+        Placement::Window(session) => {
+            format!("窗口 {session}（session {session}）→ tmux attach -t {session}")
+        }
+        Placement::Session(session) => {
+            format!("tmux 会话 {session} → tmux attach -t {session}")
+        }
+    };
+    let placement_desc = placement_label.clone();
 
     let deadline = Instant::now() + STARTUP_WAIT;
     while Instant::now() < deadline {
@@ -170,13 +253,13 @@ pub fn start(ctx: &SpawnContext<'_>, cwd_arg: Option<&str>) -> Result<String, St
         let after = rows(ctx)?;
         if let Some(new_rows) = added_rows(&before, &after) {
             return Ok(format!(
-                "✅ 已启动新实例 {}（tmux 会话 {session}；attach: tmux attach -t {session}）",
+                "✅ 已启动新实例 {}（{placement_desc}）",
                 new_rows.join("、")
             ));
         }
     }
     Ok(format!(
-        "已启动 tmux 会话 {session}，但 10s 内未见新实例注册（attach 检查: tmux attach -t {session}）"
+        "已启动（{placement_desc}），但 10s 内未见新实例注册——attach 检查"
     ))
 }
 
@@ -198,31 +281,65 @@ pub fn stop(ctx: &SpawnContext<'_>, query: &str, now: i64) -> Result<String, Str
             target.host
         ));
     }
-    let session = tmux_session_for(&target)?;
-    let status = Command::new("tmux")
-        .args(["kill-session", "-t", &session])
+    let (session, window) = tmux_target_for(
+        &ctx.spawn.tmux_command,
+        &ctx.spawn.session_prefix,
+        &target,
+    )?;
+    let target_spec = match &window {
+        Some(window) => format!("{session}:{window}"),
+        None => session.clone(),
+    };
+    let action = if window.is_some() { "kill-window" } else { "kill-session" };
+    let status = Command::new(&ctx.spawn.tmux_command)
+        .args([action, "-t", &target_spec])
         .status()
-        .map_err(|error| format!("cannot run tmux: {error}"))?;
+        .map_err(|error| format!("cannot run {}: {error}", ctx.spawn.tmux_command))?;
     if !status.success() {
-        return Err(format!("tmux kill-session {session} 失败（会话不存在？）"));
+        return Err(format!("{action} {target_spec} 失败（不存在？）"));
     }
     Ok(format!("✅ 已停止 {}", target.label()))
 }
 
 /// Find the tmux session whose cwd matches the target (not a name guess).
-fn tmux_session_for(target: &InstanceView) -> Result<String, String> {
-    let output = Command::new("tmux")
+/// Where the target instance runs: `(session, window)` discovered by cwd via
+/// list-windows (covers BOTH placements — dedicated sessions and windows).
+fn tmux_target_for(
+    tmux: &str,
+    prefix: &str,
+    target: &InstanceView,
+) -> Result<(String, Option<String>), String> {
+    let output = Command::new(tmux)
+        .args(["list-windows", "-a", "-F", "#{session_name}\t#{window_name}\t#{pane_current_path}"])
+        .output()
+        .map_err(|error| format!("cannot run {tmux}: {error}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(session), Some(window), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let is_ours = session.starts_with(&format!("{prefix}-"))
+            || window == names_from(target);
+        if is_ours && Path::new(path) == Path::new(&target.cwd) {
+            return Ok((session.to_string(), Some(window.to_string())));
+        }
+    }
+    // A dedicated-session instance may have moved cwd — fall back to the
+    // session-name scan (old behavior).
+    let output = Command::new(tmux)
         .args(["list-sessions", "-F", "#{session_name}\t#{session_path}"])
         .output()
-        .map_err(|error| format!("cannot run tmux: {error}"))?;
+        .map_err(|error| format!("cannot run {tmux}: {error}"))?;
     let text = String::from_utf8_lossy(&output.stdout);
     for line in text.lines() {
         let mut parts = line.splitn(2, '\t');
         let (Some(name), Some(path)) = (parts.next(), parts.next()) else {
             continue;
         };
-        if name.starts_with("rpi-") && Path::new(path) == Path::new(&target.cwd) {
-            return Ok(name.to_string());
+        if name.starts_with(&format!("{prefix}-")) && Path::new(path) == Path::new(&target.cwd) {
+            return Ok((name.to_string(), None));
         }
     }
     Err(format!(
@@ -230,6 +347,14 @@ fn tmux_session_for(target: &InstanceView) -> Result<String, String> {
         target.label(),
         target.cwd
     ))
+}
+
+/// The window-name candidate for a target (basename of its cwd).
+fn names_from(target: &InstanceView) -> String {
+    std::path::Path::new(&target.cwd)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 fn rows(ctx: &SpawnContext<'_>) -> Result<Vec<String>, String> {
