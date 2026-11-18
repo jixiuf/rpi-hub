@@ -32,6 +32,11 @@ pub enum WxCommand {
     Status,
     /// `/help` — the command list.
     Help,
+    /// `/start [cwd]` — launch a new instance on this machine (cwd omitted =
+    /// the bound instance's cwd).
+    Start(Option<String>),
+    /// `/stop <编号|名字>` — stop a local instance's tmux session.
+    Stop(String),
 }
 
 /// Parse a trimmed inbound text. Exact-match whitelist:
@@ -54,6 +59,21 @@ pub fn parse(text: &str) -> Option<WxCommand> {
     }
     if text == "/help" {
         return Some(WxCommand::Help);
+    }
+    if text == "/start" {
+        return Some(WxCommand::Start(None));
+    }
+    if let Some(arg) = text.strip_prefix("/start ") {
+        let arg = arg.trim();
+        if !arg.is_empty() && !arg.starts_with('/') {
+            return Some(WxCommand::Start(Some(arg.to_string())));
+        }
+    }
+    if let Some(arg) = text.strip_prefix("/stop ") {
+        let arg = arg.trim();
+        if !arg.is_empty() && !arg.starts_with('/') {
+            return Some(WxCommand::Stop(arg.to_string()));
+        }
     }
     if let Some(arg) = text.strip_prefix("/use ") {
         let arg = arg.trim();
@@ -263,7 +283,35 @@ const HELP: &str = "微信命令（直接发送，不经过 AI）:\n\
   /new        本实例开新会话\n\
   /status     本实例状态\n\
   /help       本帮助\n\
+  /start [目录]  本机启动新实例（缺省=本实例目录）\n\
+  /stop <编号|名字>  停止本机实例\n\
 其它文本原样发给当前实例的 AI。";
+
+/// Assemble the core SpawnContext for the wechat plugin. `cwd_override`
+/// wins; otherwise the bound instance's cwd (the phone's "start here").
+fn start_ctx<'a>(
+    hub: &'a Arc<Hub>,
+    cwd_override: Option<&'a str>,
+    store_dyn: &'a Arc<dyn HubStore>,
+) -> rpi_hub_core::instance_start::SpawnContext<'a> {
+    let cwd = match cwd_override.filter(|s| !s.trim().is_empty()) {
+        Some(arg) => arg.to_string(),
+        None => hub
+            .store
+            .get_instance(&hub.node_id)
+            .ok()
+            .flatten()
+            .map(|v| v.cwd)
+            .unwrap_or_default(),
+    };
+    rpi_hub_core::instance_start::SpawnContext {
+        store: store_dyn,
+        node_id: &hub.node_id,
+        host: &hub.host,
+        cwd,
+        spawn: &hub.config.instance_spawn,
+    }
+}
 
 /// Execute a parsed command on the hub and return the reply text.
 pub fn execute(hub: &Arc<Hub>, command: WxCommand) -> Result<String, String> {
@@ -289,6 +337,17 @@ pub fn execute(hub: &Arc<Hub>, command: WxCommand) -> Result<String, String> {
         }
         WxCommand::Status => Ok(status_text(hub, now)),
         WxCommand::Help => Ok(HELP.to_string()),
+        WxCommand::Start(cwd) => {
+            let store_dyn = Arc::clone(&hub.store) as Arc<dyn HubStore>;
+            let spawn_ctx = start_ctx(hub, cwd.as_deref(), &store_dyn);
+            rpi_hub_core::instance_start::start(&spawn_ctx, cwd.as_deref())
+        }
+        WxCommand::Stop(query) => {
+            let now = rpi_hub_core::now_ms();
+            let store_dyn = Arc::clone(&hub.store) as Arc<dyn HubStore>;
+            let spawn_ctx = start_ctx(hub, None, &store_dyn);
+            rpi_hub_core::instance_start::stop(&spawn_ctx, &query, now)
+        }
     }
 }
 

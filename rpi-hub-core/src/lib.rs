@@ -17,6 +17,7 @@ pub mod api;
 pub mod config;
 pub mod error;
 pub mod lease;
+pub mod instance_start;
 pub mod names;
 pub mod render;
 pub mod paths;

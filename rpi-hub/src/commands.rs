@@ -7,6 +7,8 @@
 
 use std::ffi::c_void;
 
+use std::sync::Arc;
+
 use rpi_hub_core::now_ms;
 use rpi_hub_core::protocol::{CommandIntent, Envelope};
 use rpi_plugin_sdk::{CommandHandlerFn, StbString, StbStringRef};
@@ -23,6 +25,8 @@ pub fn registry() -> Vec<(&'static str, &'static str, CommandHandlerFn)> {
         ("ask", "让实例调研并回结果：/ask <实例> <任务>", cmd_ask),
         ("run", "在远端主机跑一次性任务：/run <主机> <任务>", cmd_run),
         ("hub", "hub 诊断：/hub status|who|name <名>|leave", cmd_hub),
+        ("start", "本机启动新实例：/start [目录]（缺省=当前目录）", cmd_start),
+        ("stop", "停止本机实例：/stop <编号|名字>", cmd_stop),
     ]
 }
 
@@ -162,6 +166,56 @@ fn split_target(args: &str) -> (&str, &str) {
     match trimmed.split_once(char::is_whitespace) {
         Some((target, rest)) => (target, rest.trim()),
         None => (trimmed, ""),
+    }
+}
+
+extern "C" fn cmd_start(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
+    let args = args_of(raw);
+    let arg = args.trim();
+    let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+    match hub().and_then(|hub| {
+        let spawn_ctx = start_ctx(&hub);
+        rpi_hub_core::instance_start::start(&spawn_ctx, arg_opt)
+    }) {
+        Ok(text) => emit(out, &text),
+        Err(error) => emit_error(out, error),
+    }
+}
+
+extern "C" fn cmd_stop(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
+    let args = args_of(raw);
+    let query = args.trim();
+    if query.is_empty() {
+        emit_error(out, "用法: /stop <编号|名字>（见 /instances）");
+        return 0;
+    }
+    match hub().and_then(|hub| {
+        let now = rpi_hub_core::now_ms();
+        let spawn_ctx = start_ctx(&hub);
+        rpi_hub_core::instance_start::stop(&spawn_ctx, query, now)
+    }) {
+        Ok(text) => emit(out, &text),
+        Err(error) => emit_error(out, error),
+    }
+}
+
+/// Assemble the core SpawnContext from the hub plugin's Hub.
+fn start_ctx(
+    hub: &Arc<Hub>,
+) -> rpi_hub_core::instance_start::SpawnContext<'_> {
+    let cwd = hub
+        .store
+        .get_instance(&hub.node_id)
+        .ok()
+        .flatten()
+        .map(|v| v.cwd)
+        .unwrap_or_default();
+    rpi_hub_core::instance_start::SpawnContext {
+        store: &hub.store,
+        node_id: &hub.node_id,
+        host: &hub.host,
+        cwd,
+        spawn: &hub.config.instance_spawn,
     }
 }
 

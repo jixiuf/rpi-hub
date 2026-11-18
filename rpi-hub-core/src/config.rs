@@ -24,6 +24,9 @@ pub struct HubConfig {
     pub remote: RemoteConfig,
     pub channels: ChannelsConfig,
     pub limits: LimitsConfig,
+    /// How `/start` launches new instances on this machine.
+    #[serde(default)]
+    pub instance_spawn: InstanceSpawnConfig,
 }
 
 impl Default for HubConfig {
@@ -35,6 +38,7 @@ impl Default for HubConfig {
             remote: RemoteConfig::default(),
             channels: ChannelsConfig::default(),
             limits: LimitsConfig::default(),
+            instance_spawn: InstanceSpawnConfig::default(),
         }
     }
 }
@@ -177,8 +181,36 @@ impl Default for ChannelConfig {
     }
 }
 
+/// `/start` launch mode. Only `tmux` is implemented; `none` disables the
+/// command. Unknown values fall back to tmux with a startup warning.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SpawnMode {
+    /// `tmux new-session -d` (the default) — crash-visible, attachable.
+    #[default]
+    Tmux,
+    /// `/start` disabled on this machine.
+    None,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceSpawnConfig {
+    pub mode: SpawnMode,
+}
+
+impl InstanceSpawnConfig {
+    /// The launch label used in warnings (`tmux`/`none`).
+    pub fn mode_label(&self) -> &'static str {
+        match self.mode {
+            SpawnMode::Tmux => "tmux",
+            SpawnMode::None => "none",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase")]
 pub struct LimitsConfig {
     pub max_text_bytes: usize,
     pub inbox_batch: i64,
