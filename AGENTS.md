@@ -42,8 +42,9 @@ rpi dev-local -P rpi-hub                      # 只加载本扩展，隔离排�
 
 - macOS 上替换 `~/.rpi/agent/extensions/*.dylib` 必须先 `rm` 再 `cp`。原地覆盖保留 inode，
   新进程会映射到内核缓存的旧签名页，直接 SIGKILL（崩溃报告显示 CODESIGNING Invalid Page）。
-- `scripts/smoke.sh` 当前失败是既有问题：wechat 插件自注册 `*-wechat` 实例行，每进程两行，
-  脚本断言还停在每进程一行。修脚本或注册逻辑前，别把它当成新改动的回归。
+- smoke 用假 credentials 时字段必须是 camelCase（`userId`/`baseUrl`/`savedAt`）——
+  `Credentials` 结构是 `serde(rename_all = "camelCase")`，snake_case 会静默 parse 失败、
+  watcher 不启动、零日志（曾因此排查一整轮）。
 - `Cargo.toml` 的 `rpi-plugin-sdk` 是 path 依赖，指向本地 pi-rust 检出（suggester 槽位未发版）。
   PR #338 合并发版后改回 `rpi-plugin-sdk = "0.25"`。跨机部署脚本会重写远端的这个 path。
 
