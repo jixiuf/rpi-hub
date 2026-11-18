@@ -45,12 +45,6 @@ pub struct ReplyOutcome {
     pub at: i64,
 }
 
-pub struct HeldLease {
-    pub capability: String,
-    pub generation: i64,
-    pub expires_at: i64,
-}
-
 /// Session facts refreshed from `GetExecutionContext`.
 #[derive(Debug, Clone, Default)]
 pub struct SessionSnapshot {
@@ -116,7 +110,6 @@ pub struct Hub {
     host_free: rpi_plugin_sdk::FreeStringFn,
     shutdown: Shutdown,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
-    pub lease: Mutex<Option<HeldLease>>,
     pub pending: Mutex<Vec<PendingAsk>>,
     pub replies: Mutex<HashMap<String, ReplyOutcome>>,
     pub last_error: Mutex<Option<String>>,
@@ -193,7 +186,6 @@ impl Hub {
             host_free: api.free_string,
             shutdown: Shutdown::new(),
             worker: Mutex::new(None),
-            lease: Mutex::new(None),
             pending: Mutex::new(Vec::new()),
             replies: Mutex::new(HashMap::new()),
             last_error: Mutex::new(None),

@@ -189,11 +189,7 @@ pub struct BridgeContext {
 
 /// Run the bridge loop until the lease is lost, the session expires, or
 /// shutdown is requested.
-pub async fn run(
-    hub: Arc<Hub>,
-    ctx: BridgeContext,
-    runtime: Arc<tokio::runtime::Runtime>,
-) -> StopReason {
+pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
     // Shared cursor from the DB: a hand-off mid-poll never replays or splits
     // messages, because whoever polls next continues from the advanced cursor.
     let mut cursor = hub

@@ -98,9 +98,8 @@ fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String>
         .name("rpi-wechat-bridge".into())
         .spawn(move || {
             let runtime = std::sync::Arc::new(tokio_lite());
-            let bridge_runtime = Arc::clone(&runtime);
             runtime.block_on(async move {
-                let reason = bridge::run(thread_hub, ctx, Arc::clone(&bridge_runtime)).await;
+                let reason = bridge::run(thread_hub, ctx).await;
                 host::log(&format!("bridge stopped: {reason:?}"));
             });
             status_hub.mark_stopped();
@@ -111,7 +110,7 @@ fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String>
 }
 
 /// Minimal single-threaded runtime for the bridge's async HTTP calls.
-fn tokio_lite() -> tokio::runtime::Runtime {
+pub(crate) fn tokio_lite() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

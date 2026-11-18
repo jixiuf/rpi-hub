@@ -158,13 +158,6 @@ async fn send_media(
     }
 }
 
-fn tokio_lite() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime")
-}
-
 struct SendDrive {
     path: Option<String>,
     is_image: bool,
@@ -270,7 +263,7 @@ extern "C" fn send_poll(
                 std::thread::spawn(move || {
                     let outcome = match credentials {
                         Some(credentials) => {
-                            let runtime = tokio_lite();
+                            let runtime = crate::commands::tokio_lite();
                             let client =
                                 match IlinkClient::new(
                                     &credentials.base_url,
