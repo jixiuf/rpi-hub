@@ -73,6 +73,8 @@ rpi install --path ./rpi-wechat      # 微信文字通道
 /cmd <实例> <指令>          远程执行指令（结果以通知形式回到本会话）
 /ask <实例> <任务>          委派任务（结果以通知形式回到本会话）
 /run <主机> <任务>          远端一次性任务（remoteHosts，无需对方跑实例）
+/start [目录]               本机 tmux 启动新实例（缺省=当前实例目录；允许同目录多实例）
+/stop <实例|编号>           停止本机实例的 tmux（租约自动交还）
 /hub status|who|name <名>|leave
 ```
 
@@ -86,6 +88,8 @@ rpi install --path ./rpi-wechat      # 微信文字通道
 /use <编号|名字>    切换微信接管；自动回显目标实例状态
 /new                本实例开新会话
 /status             本实例状态（模型/会话/目录/忙闲/心跳/微信持有者）
+/start [目录]       本机启动新实例（缺省=本实例目录）
+/stop <编号|名字>   停止本机实例（微信租约自动交还）
 /help               命令列表
 ```
 
@@ -116,8 +120,28 @@ rpi install --path ./rpi-wechat      # 微信文字通道
     }
   },
   "channels": { "wechat": { "enabled": true, "autoClaim": true } },
-  "limits": { "maxTextBytes": 65536, "inboxBatch": 32 }
+  "limits": { "maxTextBytes": 65536, "inboxBatch": 32 },
+  "instanceSpawn": {
+    "mode": "current",
+    "sessionPrefix": "rpi",
+    "command": ["rpi"],
+    "tmuxCommand": "tmux"
+  }
 }
+```
+
+**instanceSpawn** —— `/start` 如何在本机拉起新实例：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `mode` | `"tmux"` | `"tmux"`=独立 detached 会话；`"current"`=当前实例所在的 tmux 会话里开新**窗口**（`$TMUX` 缺失时自动回退为独立会话）；`"none"`=禁用 `/start` |
+| `sessionPrefix` | `"rpi"` | 专用会话名前缀（`rpi-<目录名>`，占用时自动 `-2/-3`）|
+| `command` | `"rpi"` | 新实例的命令行；字符串=单命令，数组=命令+参数（如 `["rpi", "--model", "x"]`）|
+| `tmuxCommand` | `"tmux"` | tmux 二进制路径（自编译/非 PATH 安装时用）|
+
+同目录允许启动多个实例（会话名自动递增；实例名冲突由 rpi 的 `-<pid>` 机制兜底）。
+`/stop` 按 cwd 在 tmux 里定位目标：窗口用 `kill-window`，专用会话用 `kill-session`；
+实例退出走插件 lifecycle，微信租约自动交还（watcher 秒级接管）。
 ```
 
 环境变量：`RPI_HUB_DIR`（状态目录）、`RPI_HUB_INSTANCE`（实例名）、`RPI_HUB_DEBUG=1`。

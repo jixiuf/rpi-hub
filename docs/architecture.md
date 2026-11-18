@@ -147,12 +147,12 @@ ssh -o BatchMode=yes -- <ssh> sh -lc 'cd "$1" || exit 70; shift; exec "$@" -p "$
 
 ## 8. 路线图
 
-1. 媒体与图片注入、`/sessions`/`/goto`、`/start`（tmux）、隔离委派（目标机 `rpi -p` 子进程）
-2. 修复 `scripts/smoke.sh` 的实例数断言（wechat 自注册 `*-wechat` 行后每进程两行）
+1. 媒体与图片注入、`/sessions`/`/goto`、隔离委派（目标机 `rpi -p` 子进程）
+2. `/sum`（最后 AI 回复摘要——需 pi-rust 暴露会话历史 action）
 
 ## 9. 已验证的真实拓扑
 
 `RELAY_PORT=8085 scripts/smoke-relay.sh apmprod`：apmprod（Linux）用 tmux 起 relay 实例
 （`http:true`，端口 8085 经公司防火墙可达），本机以 client 直连；断言跨机 presence、
 `/use` 把微信租约切到远端、relay 数据库里 owner 一致。单机回归 `scripts/smoke.sh`
-覆盖两实例、重名、唯一租约（目前实例数断言落后于 wechat 自注册行为，待修）。
+覆盖两实例、重名、唯一租约、/use 交接（端到端全绿）。
