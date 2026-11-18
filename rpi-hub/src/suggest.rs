@@ -91,7 +91,7 @@ fn cached_rows(hub: &std::sync::Arc<host::Hub>) -> Option<Vec<serde_json::Value>
         Some(all) => all,
         None => {
             let instances = hub.instances(now_ms()).ok()?;
-            let holder = hub.store.lease_holder("wechat").ok()?;
+            let holder = hub.lease_observer.holder("wechat").ok()?;
             // Local instance first (current), then others by name — same order
             // as `/instances`, so the popup numbering matches.
             let mut rows: Vec<(bool, &InstanceView)> = instances

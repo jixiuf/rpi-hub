@@ -95,6 +95,8 @@ pub struct Hub {
     pub dir: PathBuf,
     pub config: HubConfig,
     pub store: Arc<dyn HubStore>,
+    /// Read-only lease surface (rpi-hub-core::lease). The hub never claims.
+    pub lease_observer: rpi_hub_core::lease::LeaseObserver,
     backend: Mutex<Option<crate::backends::Backends>>,
     pub host: String,
     pub node_id: String,
@@ -159,6 +161,7 @@ impl Hub {
 
         let backends = crate::backends::Backends::start(&dir, &config).map_err(|e| e.to_string())?;
         let store = Arc::clone(&backends.store);
+        let lease_observer = rpi_hub_core::lease::LeaseObserver::new(Arc::clone(&store));
         let host = detect_host();
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let pid = std::process::id();
@@ -168,6 +171,7 @@ impl Hub {
             dir,
             config,
             store,
+            lease_observer,
             backend: Mutex::new(Some(backends)),
             host: host.clone(),
             node_id: names::node_id(&host, &cwd, pid),
@@ -419,17 +423,11 @@ impl Hub {
     /// `owner_epoch` is empty here: the target instance claims the lease with
     /// its own epoch on its next lease tick (same owner_node → resume branch).
     pub fn switch_lease_to(&self, target: &InstanceView) -> Result<String, String> {
-        let generation = self
-            .store
-            .assign_lease(
-                "wechat",
-                &target.node_id,
-                &target.name,
-                "",
-                now_ms(),
-                self.config.lease.ttl_ms(),
-            )
-            .map_err(|e| e.to_string())?;
+        let admin = rpi_hub_core::lease::LeaseAdmin::new(
+            Arc::clone(&self.store),
+            self.config.lease.ttl_ms(),
+        );
+        let generation = admin.assign_to("wechat", target, now_ms())?;
         Ok(format!(
             "微信接管已切换到 {}{}（generation {generation}）",
             target.label(),
@@ -481,8 +479,8 @@ impl Hub {
             return Ok("没有登记的实例".to_string());
         }
         let holder = self
-            .store
-            .lease_holder("wechat")
+            .lease_observer
+            .holder("wechat")
             .map_err(|e| e.to_string())?
             .filter(|h| h.expires_at > now);
         let mut lines = Vec::with_capacity(instances.len() + 2);

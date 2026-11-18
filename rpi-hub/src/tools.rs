@@ -453,17 +453,11 @@ fn run_switch(params: &str) -> Result<String, String> {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or("wechat");
-    let generation = hub
-        .store
-        .assign_lease(
-            capability,
-            &target.node_id,
-            &target.name,
-            "",
-            now_ms(),
-            hub.config.lease.ttl_ms(),
-        )
-        .map_err(|e| e.to_string())?;
+    let admin = rpi_hub_core::lease::LeaseAdmin::new(
+        Arc::clone(&hub.store),
+        hub.config.lease.ttl_ms(),
+    );
+    let generation = admin.assign_to(capability, &target, now_ms())?;
     Ok(describe_transfer(capability, &target.label(), generation))
 }
 
@@ -473,7 +467,7 @@ fn describe_transfer(capability: &str, label: &str, generation: i64) -> String {
 
 /// Format the lease table for `/hub who`.
 pub fn format_leases(hub: &Hub) -> Result<String, String> {
-    let leases = hub.store.list_leases().map_err(|e| e.to_string())?;
+    let leases = hub.lease_observer.all().map_err(|e| e.to_string())?;
     if leases.is_empty() {
         return Ok("没有任何接管租约".to_string());
     }

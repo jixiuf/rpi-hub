@@ -149,8 +149,8 @@ fn run_command(args: &str) -> Result<String, String> {
         "" | "status" => {
             let credentials = Credentials::load(&dir);
             let holder = hub
-                .store
-                .lease_holder("wechat")
+                .lease_owner
+                .holder("wechat")
                 .map_err(|e| e.to_string())?;
             Ok(format!(
                 "实例: {}\n凭据: {}\n桥: {}\n绑定用户: {}\n微信接管: {}\n禁用标志: {}",

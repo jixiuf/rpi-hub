@@ -66,8 +66,8 @@ fn selector_items(hub: &Hub) -> Result<Vec<serde_json::Value>, String> {
         return Err("没有登记的实例".to_string());
     }
     let holder = hub
-        .store
-        .lease_holder("wechat")
+        .lease_observer
+        .holder("wechat")
         .map_err(|e| e.to_string())?;
     Ok(instances
         .iter()
@@ -387,8 +387,8 @@ extern "C" fn cmd_hub(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
                 const BUILD: &str = concat!(env!("CARGO_PKG_VERSION"), "@", env!("BUILD_STAMP"));
                 let stats = hub.store.stats(now_ms()).map_err(|e| e.to_string())?;
                 let holder = hub
-                    .store
-                    .lease_holder("wechat")
+                    .lease_observer
+                    .holder("wechat")
                     .map_err(|e| e.to_string())?;
                 Ok(format!(
                     "构建: {BUILD}\n实例: {}\n节点: {}\n模式: {:?}\n实例数: {}\n待投递: {}/{} 条\n微信接管: {}",

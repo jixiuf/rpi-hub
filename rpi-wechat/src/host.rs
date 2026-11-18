@@ -113,8 +113,12 @@ pub struct Hub {
     action_fn: std::sync::Mutex<RuntimeActionFn>,
     host_free: std::sync::Mutex<rpi_plugin_sdk::FreeStringFn>,
     pub shutdown: Shutdown,
-    /// Wechat lease held by this instance.
+    /// Wechat lease held by this instance (generation bookkeeping; the claim
+    /// / renew / release calls themselves go through `lease_owner`).
     pub lease: Mutex<Option<HeldLease>>,
+    /// The capability-split lease token (rpi-hub-core::lease): claim / renew
+    /// / release / check for THIS node. The hub plugin has no such token.
+    pub lease_owner: rpi_hub_core::lease::LeaseOwner,
     /// The bound WeChat user (from credentials).
     pub user_id: Mutex<Option<String>>,
     /// Outbound reply channel (writer held by the bridge thread).
@@ -156,12 +160,21 @@ impl Hub {
         let host = detect_host();
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let pid = std::process::id();
+        let node_id = names::node_id(&host, &cwd, pid);
+        let epoch = uuid::Uuid::new_v4().to_string();
         Ok(Arc::new(Self {
-            store,
+            store: Arc::clone(&store),
             host: host.clone(),
-            node_id: names::node_id(&host, &cwd, pid),
-            epoch: uuid::Uuid::new_v4().to_string(),
+            node_id: node_id.clone(),
+            epoch: epoch.clone(),
             name: Mutex::new(config.resolved_name(&cwd)),
+            lease_owner: rpi_hub_core::lease::LeaseOwner::new(
+                store,
+                node_id,
+                config.resolved_name(&cwd),
+                epoch,
+                config.lease.ttl_ms(),
+            ),
             config,
             dir,
             busy: AtomicBool::new(false),
@@ -258,51 +271,10 @@ impl Hub {
     /// is fenced out on its first tick (the LeaseLost-on-startup bug).
     pub fn claim_wechat(&self) -> Result<Claim, String> {
         let now = now_ms();
-        let claim = self
-            .store
-            .claim_lease(
-                "wechat",
-                &self.node_id,
-                &self.name(),
-                &self.epoch,
-                now,
-                self.config.lease.ttl_ms(),
-            )
-            .map_err(|e| e.to_string())?;
-        // Watcher takeover: if the lease is held by an instance that has died
-        // (its presence row is gone but the lease lingers until TTL), force a
-        // transfer so the unattended window is seconds, not the full TTL.
-        if let Claim::Held { holder } = &claim {
-            let owner_alive = self
-                .store
-                .get_instance(&holder.owner_node)
-                .map(|instance| instance.is_some())
-                .unwrap_or(false);
-            if !owner_alive {
-                let generation = self
-                    .store
-                    .assign_lease(
-                        "wechat",
-                        &self.node_id,
-                        &self.name(),
-                        &self.epoch,
-                        now,
-                        self.config.lease.ttl_ms(),
-                    )
-                    .map_err(|e| e.to_string())?;
-                // Record the held lease BEFORE returning: the bridge's first
-                // renew_lease reads this state. Missing this made every
-                // watcher takeover die LeaseLost on its first tick.
-                *self.lease.lock().unwrap_or_else(|p| p.into_inner()) = Some(HeldLease {
-                    generation,
-                    expires_at: now + self.config.lease.ttl_ms(),
-                });
-                return Ok(Claim::Granted {
-                    generation,
-                    expires_at: now + self.config.lease.ttl_ms(),
-                });
-            }
-        }
+        // The facade (rpi-hub-core::lease::LeaseOwner) carries claim + the
+        // dead-owner takeover branch; this method only records the resulting
+        // generation for the bridge's fence gate.
+        let claim = self.lease_owner.claim("wechat", now)?;
         match &claim {
             Claim::Granted {
                 generation,
@@ -505,8 +477,8 @@ impl Hub {
         // was fenced (`/use` hand-off); a plain ✗ only for a real stop. The
         // wechat claim uses this plugin's plain node_id (see claim_wechat).
         let holder = self
-            .store
-            .lease_holder("wechat")
+            .lease_owner
+            .holder("wechat")
             .ok()
             .flatten()
             .filter(|h| h.owner_node != self.node_id);

@@ -219,15 +219,8 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
                 return StopReason::LeaseLost;
             };
             let renewed = hub
-                .store
-                .renew_lease(
-                    "wechat",
-                    &hub.node_id,
-                    &hub.epoch,
-                    lease.generation,
-                    now,
-                    ttl,
-                )
+                .lease_owner
+                .renew("wechat", lease.generation, now)
                 .unwrap_or(false);
             if renewed {
                 lease.expires_at = now + ttl;
@@ -289,9 +282,7 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
                             .as_ref()
                             .map(|l| l.generation)
                             .unwrap_or(0);
-                        hub.store
-                            .check_lease("wechat", &hub.node_id, &hub.epoch, generation, now_ms())
-                            .unwrap_or(false)
+                        hub.lease_owner.check("wechat", generation, now_ms())
                     };
                     if !still_owner {
                         host::log("lease lost mid-poll; dropping message for the new owner");
@@ -540,9 +531,7 @@ async fn tokio_time(duration: Duration) {
 /// Store-level lease hand-off used by `/wechat stop`: release and stop.
 pub fn release_and_stop(hub: &Arc<Hub>) {
     if let Some(lease) = hub.lease.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
-        let _ = hub
-            .store
-            .release_lease("wechat", &hub.node_id, &hub.epoch, lease.generation);
+        let _ = hub.lease_owner.release("wechat", lease.generation);
     }
     hub.request_shutdown();
 }
