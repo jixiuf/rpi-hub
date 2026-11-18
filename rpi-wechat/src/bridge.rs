@@ -24,7 +24,7 @@ use rpi_hub_core::now_ms;
 use crate::error::IlinkError;
 use crate::host;
 use crate::host::Hub;
-use crate::ilink::{self, IlinkClient};
+use crate::ilink::{self, FilePayload, ImagePayload, IlinkClient};
 
 /// Backoff after a transport error.
 const TRANSPORT_BACKOFF: Duration = Duration::from_secs(5);
@@ -180,6 +180,177 @@ pub enum StopReason {
 }
 
 /// Everything the bridge thread needs.
+/// Mutable accumulation threaded through the inbound handlers: images/files
+/// gathered while the user composes, flushed together on the next text.
+#[derive(Default)]
+pub struct BatchState {
+    pub images: Vec<ImageData>,
+    pub files: Vec<AccumulatedFile>,
+}
+
+// ---- per-kind inbound handlers (PR-3b): one async fn per message kind ----
+
+/// Text flushes whatever accumulated with it (images/files) as one injection.
+async fn handle_text(
+    hub: Arc<Hub>,
+    ctx: &BridgeContext,
+    text: String,
+    batch: &mut BatchState,
+) {
+    drain_inbound(
+        hub,
+        ctx,
+        text,
+        std::mem::take(&mut batch.images),
+        std::mem::take(&mut batch.files),
+    )
+    .await;
+}
+
+/// Image: download, save, notify, accumulate for the next text message.
+async fn handle_image(
+    hub: Arc<Hub>,
+    ctx: &BridgeContext,
+    payload: ImagePayload,
+    context_token: Option<&str>,
+    batch: &mut BatchState,
+) {
+    let download = ctx.client.clone();
+    let url = payload.url.clone();
+    let key = payload.aes_key.clone();
+    let media_dir = media_dir_of(&hub);
+    let downloaded = async {
+        let (bytes, _media_type) =
+            crate::media::download_image(&download, &url, key.as_deref()).await?;
+        let data = crate::ilink::base64_encode(&bytes);
+        crate::media::save_to_disk(&media_dir, "image.jpg", &bytes)?;
+        Ok::<String, IlinkError>(data)
+    }
+    .await;
+    match downloaded {
+        Ok(data) => {
+            let _ = hub.notice("📨 微信图片已接收");
+            let _ = ctx
+                .client
+                .send_text(
+                    &ctx.user_id,
+                    "✅ 图片已接收（发送文字说明需求后一并交给 agent）",
+                    context_token,
+                )
+                .await;
+            batch.images.push(ImageData {
+                data,
+                media_type: "image/jpeg".into(),
+            });
+        }
+        Err(error) => {
+            hub.record_error(format!("wechat image: {error}"));
+            let _ = ctx
+                .client
+                .send_text(
+                    &ctx.user_id,
+                    &format!("⚠ 图片处理失败: {error}"),
+                    context_token,
+                )
+                .await;
+        }
+    }
+}
+
+/// File: download, save, notify, accumulate (never auto-injected).
+async fn handle_file(
+    hub: Arc<Hub>,
+    ctx: &BridgeContext,
+    payload: FilePayload,
+    context_token: Option<&str>,
+    batch: &mut BatchState,
+) {
+    host::log(&format!(
+        "file branch: param_len={} key={} name={}",
+        payload.encrypt_param.len(),
+        payload.aes_key.is_some(),
+        payload.file_name
+    ));
+    let download = ctx.client.clone();
+    let full_url = payload.full_url.clone();
+    let key = payload.aes_key.clone();
+    let name = payload.file_name.clone();
+    let media_dir = media_dir_of(&hub);
+    let downloaded: Result<(Vec<u8>, PathBuf), IlinkError> = async {
+        let bytes = crate::media::download_file(&download, &full_url, key.as_deref()).await?;
+        let path = crate::media::save_to_disk(&media_dir, &name, &bytes)?;
+        Ok((bytes, path))
+    }
+    .await;
+    match downloaded {
+        Ok((bytes, path)) => {
+            batch.files.push(AccumulatedFile {
+                name: name.clone(),
+                size: bytes.len(),
+                path: path.display().to_string(),
+            });
+            let _ = hub.notice(&format!("📨 微信文件已接收: {}", path.display()));
+            let kb = (bytes.len() as f64 / 1024.0 * 10.0).round() / 10.0;
+            let _ = ctx
+                .client
+                .send_text(
+                    &ctx.user_id,
+                    &format!("✅ 已保存: {name} ({kb} KB)。下一条文字消息会连同文件一起交给 agent"),
+                    context_token,
+                )
+                .await;
+        }
+        Err(error) => {
+            hub.record_error(format!("wechat file: {error}"));
+            let _ = ctx
+                .client
+                .send_text(
+                    &ctx.user_id,
+                    &format!("⚠ 文件处理失败: {error}"),
+                    context_token,
+                )
+                .await;
+        }
+    }
+}
+
+/// Voice: inject the server transcript (with accumulated media), or explain.
+async fn handle_voice(
+    hub: Arc<Hub>,
+    ctx: &BridgeContext,
+    transcript: Option<String>,
+    context_token: Option<&str>,
+    batch: &mut BatchState,
+) {
+    match transcript {
+        Some(text) => handle_text(hub, ctx, format!("[语音转文字] {text}"), batch).await,
+        None => {
+            let _ = hub.notice("📨 微信语音：无转写文本");
+            let _ = ctx
+                .client
+                .send_text(
+                    &ctx.user_id,
+                    "⚠ 语音没能转成文字，请改用文字或图片说明需求",
+                    context_token,
+                )
+                .await;
+        }
+    }
+}
+
+/// Video: not supported; tell the user rather than dropping silently.
+async fn handle_video(hub: Arc<Hub>, ctx: &BridgeContext, context_token: Option<&str>) {
+    let _ = hub.notice("📨 微信视频已接收（暂不支持查看）");
+    let _ = ctx
+        .client
+        .send_text(
+            &ctx.user_id,
+            "⚠ 视频暂不支持，请改用文字或图片说明需求",
+            context_token,
+        )
+        .await;
+}
+
 pub struct BridgeContext {
     pub client: IlinkClient,
     pub user_id: String,
@@ -201,8 +372,7 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
     let mut context_token: Option<String> = None;
     let mut typing_ticket: Option<String> = None;
     let mut pending_chunks: Vec<String> = Vec::new();
-    let mut accumulated_files: Vec<AccumulatedFile> = Vec::new();
-    let mut batch_images: Vec<ImageData> = Vec::new();
+    let mut batch = BatchState::default();
 
     loop {
         if hub.shutdown.requested() {
@@ -290,168 +460,49 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
                     }
                     match incoming.kind.as_str() {
                         "text" => {
-                            let text = incoming.text.clone();
-                            drain_inbound(
-                                Arc::clone(&hub),
-                                &ctx,
-                                text,
-                                std::mem::take(&mut batch_images),
-                                std::mem::take(&mut accumulated_files),
-                            )
-                            .await;
+                            handle_text(Arc::clone(&hub), &ctx, incoming.text.clone(), &mut batch)
+                                .await;
                         }
                         "image" => {
                             let Some(payload) = incoming.image.clone() else {
                                 continue;
                             };
-                            let download = ctx.client.clone();
-                            let url = payload.url.clone();
-                            let key = payload.aes_key.clone();
-                            let media_dir = media_dir_of(&hub);
-                            let downloaded = async {
-                                let (bytes, _media_type) =
-                                    crate::media::download_image(&download, &url, key.as_deref())
-                                        .await?;
-                                let data = crate::ilink::base64_encode(&bytes);
-                                crate::media::save_to_disk(&media_dir, "image.jpg", &bytes)?;
-                                Ok::<String, IlinkError>(data)
-                            }
+                            handle_image(
+                                Arc::clone(&hub),
+                                &ctx,
+                                payload,
+                                context_token.as_deref(),
+                                &mut batch,
+                            )
                             .await;
-                            match downloaded {
-                                Ok(data) => {
-                                    let _ = hub.notice("📨 微信图片已接收");
-                                    let _ = ctx
-                                        .client
-                                        .send_text(
-                                            &ctx.user_id,
-                                            "✅ 图片已接收（发送文字说明需求后一并交给 agent）",
-                                            context_token.as_deref(),
-                                        )
-                                        .await;
-                                    batch_images.push(ImageData {
-                                        data,
-                                        media_type: "image/jpeg".into(),
-                                    });
-                                }
-                                Err(error) => {
-                                    hub.record_error(format!("wechat image: {error}"));
-                                    let _ = ctx
-                                        .client
-                                        .send_text(
-                                            &ctx.user_id,
-                                            &format!("⚠ 图片处理失败: {error}"),
-                                            context_token.as_deref(),
-                                        )
-                                        .await;
-                                }
-                            }
                         }
                         "file" => {
                             let Some(payload) = incoming.file.clone() else {
                                 continue;
                             };
-                            host::log(&format!(
-                                "file branch: param_len={} key={} name={}",
-                                payload.encrypt_param.len(),
-                                payload.aes_key.is_some(),
-                                payload.file_name
-                            ));
-                            let download = ctx.client.clone();
-                            let full_url = payload.full_url.clone();
-                            let key = payload.aes_key.clone();
-                            let name = payload.file_name.clone();
-                            let name_for_save = name.clone();
-                            let media_dir = media_dir_of(&hub);
-                            let downloaded: Result<(Vec<u8>, PathBuf), IlinkError> = async {
-                                let bytes = crate::media::download_file(
-                                    &download,
-                                    &full_url,
-                                    key.as_deref(),
-                                )
-                                .await?;
-                                let path =
-                                    crate::media::save_to_disk(&media_dir, &name_for_save, &bytes)?;
-                                Ok((bytes, path))
-                            }
+                            handle_file(
+                                Arc::clone(&hub),
+                                &ctx,
+                                payload,
+                                context_token.as_deref(),
+                                &mut batch,
+                            )
                             .await;
-                            match downloaded {
-                                Ok((bytes, path)) => {
-                                    accumulated_files.push(AccumulatedFile {
-                                        name: name.clone(),
-                                        size: bytes.len(),
-                                        path: path.display().to_string(),
-                                    });
-                                    let _ = hub
-                                        .notice(&format!("📨 微信文件已接收: {}", path.display()));
-                                    let kb = (bytes.len() as f64 / 1024.0 * 10.0).round() / 10.0;
-                                    let _ = ctx
-                                        .client
-                                        .send_text(
-                                            &ctx.user_id,
-                                            &format!(
-                                                "✅ 已保存: {name} ({kb} KB)。下一条文字消息会连同文件一起交给 agent"
-                                            ),
-                                            context_token.as_deref(),
-                                        )
-                                        .await;
-                                }
-                                Err(error) => {
-                                    hub.record_error(format!("wechat file: {error}"));
-                                    let _ = ctx
-                                        .client
-                                        .send_text(
-                                            &ctx.user_id,
-                                            &format!("⚠ 文件处理失败: {error}"),
-                                            context_token.as_deref(),
-                                        )
-                                        .await;
-                                }
-                            }
                         }
                         "voice" => {
-                            // The iLink server transcribes voice messages;
-                            // inject the transcript like any other text (with
-                            // a marker so the agent knows the origin). Without
-                            // a transcript there is nothing to act on — tell
-                            // the user instead of silently dropping it.
-                            match incoming.voice.as_deref() {
-                                Some(transcript) => {
-                                    drain_inbound(
-                                        Arc::clone(&hub),
-                                        &ctx,
-                                        format!("[语音转文字] {transcript}"),
-                                        std::mem::take(&mut batch_images),
-                                        std::mem::take(&mut accumulated_files),
-                                    )
-                                    .await;
-                                }
-                                None => {
-                                    let _ = hub.notice("📨 微信语音：无转写文本");
-                                    let _ = ctx
-                                        .client
-                                        .send_text(
-                                            &ctx.user_id,
-                                            "⚠ 语音没能转成文字，请改用文字或图片说明需求",
-                                            context_token.as_deref(),
-                                        )
-                                        .await;
-                                }
-                            }
+                            handle_voice(
+                                Arc::clone(&hub),
+                                &ctx,
+                                incoming.voice.clone(),
+                                context_token.as_deref(),
+                                &mut batch,
+                            )
+                            .await;
                         }
                         "video" => {
-                            let _ = hub.notice("📨 微信视频已接收（暂不支持查看）");
-                            let _ = ctx
-                                .client
-                                .send_text(
-                                    &ctx.user_id,
-                                    "⚠ 视频暂不支持，请改用文字或图片说明需求",
-                                    context_token.as_deref(),
-                                )
-                                .await;
+                            handle_video(Arc::clone(&hub), &ctx, context_token.as_deref()).await;
                         }
-                        other => {
-                            let _ = hub.notice(&format!("（微信收到{other}消息，暂不支持）"));
-                        }
+                        _ => {}
                     }
                 }
             }
