@@ -36,6 +36,15 @@ HUB_DIR="$WORK/hub"
 DB="$HUB_DIR/hub.db"
 LOG="$HUB_DIR/logs/hub.log"
 PIDS=()
+
+# The wechat lease is claimed by the rpi-wechat plugin's watcher (not the hub
+# worker — the hub only observes now). It claims only when credentials exist
+# and the bridge is not disabled: seed a dummy credential file. No network is
+# touched — the claim path never calls iLink.
+mkdir -p "$HUB_DIR/wechat"
+cat > "$HUB_DIR/wechat/credentials.json" <<'JSON'
+{"token": "smoke-dummy", "baseUrl": "http://127.0.0.1:1", "userId": "smoke-user", "savedAt": 0}
+JSON
 cleanup() {
   for pid in "${PIDS[@]:-}"; do
     [[ -n "${pid:-}" ]] && kill "$pid" 2>/dev/null || true

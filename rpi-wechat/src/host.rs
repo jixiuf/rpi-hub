@@ -235,37 +235,6 @@ impl Hub {
         *self.host_free.lock().unwrap_or_else(|p| p.into_inner()) = host_free;
     }
 
-    /// Claim the wechat lease (auto, when the plugin starts the bridge).
-    /// Register presence for the WeChat channel (role=channel). Name
-    /// collisions resolve to `-<pid>` exactly like the main hub row; the
-    /// resolved name is kept for claim-time consistency.
-    pub fn register_presence(&self, last_seen: i64) -> Result<String, String> {
-        let record = InstanceRecord {
-            node_id: format!("{}-wechat", self.node_id),
-            name: format!("{}-wechat", self.name()),
-            host: self.host.clone(),
-            pid: std::process::id(),
-            cwd: std::env::current_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string(),
-            role: "channel".into(),
-            epoch: self.epoch.clone(),
-            session_id: None,
-            title: Some("微信通道".into()),
-            model: None,
-            busy: false,
-            started_at: last_seen,
-            last_seen,
-        };
-        let registered = self
-            .store
-            .register_instance(&record, ALIVE_MS)
-            .map_err(|e| e.to_string())?;
-        self.set_name(registered.name.replace("-wechat", ""));
-        Ok(registered.name)
-    }
-
     /// Claim the wechat lease AND record it in `self.lease` — the bridge
     /// gate checks the recorded generation, so a claim without this bookkeeping
     /// is fenced out on its first tick (the LeaseLost-on-startup bug).
@@ -570,26 +539,6 @@ pub fn detect_host() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn node_id_role_marks_the_channel_row() {
-        let record = InstanceRecord {
-            node_id: "n-wechat".into(),
-            name: "x-wechat".into(),
-            host: "h".into(),
-            pid: 1,
-            cwd: "/work".into(),
-            role: "channel".into(),
-            epoch: "e".into(),
-            session_id: None,
-            title: None,
-            model: None,
-            busy: false,
-            started_at: 0,
-            last_seen: 0,
-        };
-        assert_eq!(record.role, "channel");
-    }
 
     #[test]
     fn detect_host_returns_something() {

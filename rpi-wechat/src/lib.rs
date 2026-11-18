@@ -23,7 +23,6 @@ mod outbound;
 pub mod qr;
 mod state;
 
-use rpi_hub_core::now_ms;
 
 pub use error::IlinkError;
 pub use host::{current, Hub};
@@ -69,11 +68,7 @@ rpi_plugin_sdk::export_plugin!(|api| {
     }
     // Auto-start the bridge when credentials exist, the disabled flag is off,
     // and the wechat lease is free (claim is inside spawn_bridge).
-    // Register the channel presence row: makes the WeChat channel visible in
-    // /instances and keeps its claim-time name consistent with the registry
-    // (a name collision appends -<pid>, which claim_lease then reuses).
     let dir = hub.dir.clone();
-    let _ = hub.register_presence(now_ms());
     if !state::is_disabled(&dir) {
         if let Some(credentials) = state::Credentials::load(&dir) {
             match commands::spawn_bridge_public(&hub, &credentials) {
