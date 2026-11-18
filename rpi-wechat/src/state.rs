@@ -31,10 +31,27 @@ fn default_base_url() -> String {
 }
 
 impl Credentials {
+    /// Load the bound credentials. `None` means "not logged in" OR "file
+    /// exists but unparseable" — the latter used to be silent and left the
+    /// watcher unspawned with zero logs (the smoke camelCase bug), so a
+    /// parse failure is logged with its reason. Missing file stays quiet:
+    /// that is the normal pre-login state.
     pub fn load(dir: &Path) -> Option<Self> {
         let path = wechat_dir(dir).join("credentials.json");
-        let text = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&text).ok()
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => return None, // not logged in yet
+        };
+        match serde_json::from_str(&text) {
+            Ok(credentials) => Some(credentials),
+            Err(error) => {
+                eprintln!(
+                    "rpi-wechat: {} is unparseable ({error}); run /wechat login again",
+                    path.display()
+                );
+                None
+            }
+        }
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {

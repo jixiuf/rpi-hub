@@ -27,6 +27,17 @@ rpi dev-local -P rpi-hub                      # 只加载本扩展，隔离排�
 `git diff --stat` 确认没碰别的文件，多余的 fmt-only 改动回退掉。clippy 以 main 为基线，
 不新增告警即可（现存告警不必顺手修）。
 
+## 重构 checklist（每轮结构改动后必走）
+
+以"数据流生命周期"为单位审计，而不只看代码结构：
+
+- **写者-续期者配对**：每个一次性注册/写入（presence 行、租约、文件状态）都要找到它的
+  持续刷新者或删除者；找不到配对的，要么补上，要么删掉（channel 行 bug 即此类）。
+- **外部输入的 serde 格式核对**：带 `rename_all` 的结构如果可能被外部写入（手放的 JSON、
+  smoke seed、别的工具），字段名必须逐一核对——`snake_case` 撞上 `camelCase` 会静默
+  parse 失败（smoke credentials bug 即此类）；`load()` 类函数的 parse 失败必须留日志。
+- **grep 契约**：拆门面/trait 时同步写验收 grep（如租约裸方法在插件层零命中），合并前跑。
+
 ## 已知坑
 
 - macOS 上替换 `~/.rpi/agent/extensions/*.dylib` 必须先 `rm` 再 `cp`。原地覆盖保留 inode，
