@@ -24,9 +24,6 @@ type Aes128Ecb = ecb::Decryptor<aes::Aes128>;
 
 // (moved to ilink.rs; media.rs uses the client's fetch_cdn)
 
-/// Fixed CDN base for media transfer (upload + download).
-pub const CDN_BASE: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
-
 /// AES-128-ECB decrypt with best-effort PKCS#7 unpadding.
 pub fn aes_decrypt_ecb(ciphertext: &[u8], key_hex: &str) -> Result<Vec<u8>, IlinkError> {
     let key = decode_hex_key(key_hex)?;
@@ -276,15 +273,6 @@ fn media_type_of(is_image: bool) -> i64 {
     // type is a different namespace (image=2, file=4) - do not confuse them.
     if is_image { 1 } else { 3 }
 }
-
-struct OutboundDrive {
-    path: Option<String>,
-    is_image: bool,
-    started: bool,
-    outcome: Option<Result<String, String>>,
-}
-
-static DRIVES: ToolHandles<OutboundDrive> = ToolHandles::new();
 
 fn parse_and_validate(params: &str, hub: &crate::host::Hub) -> Result<PathBuf, String> {
     let value: serde_json::Value =
