@@ -298,6 +298,11 @@ fn login_flow(hub: &Arc<Hub>) -> Result<String, String> {
 pub fn event_registry() -> Vec<(EventTag, EventHandlerFn)> {
     vec![
         (EventTag::AgentStart, on_agent_start),
+        // AgentEnd fires on BOTH the completed and the C-c-aborted path (the
+        // aborted run emits it before AgentSettled, which rides the later
+        // RunEnd dispatch). Without this handler the busy flag lingered for
+        // seconds after an interrupt and /instances showed 忙.
+        (EventTag::AgentEnd, on_agent_end),
         (EventTag::AgentSettled, on_agent_settled),
         (EventTag::MessageEnd, on_message_end),
     ]
@@ -307,6 +312,15 @@ rpi_plugin_sdk::event_handler! {
     fn on_agent_start(_event, _user_data) {
         if let Some(hub) = host::current() {
             hub.busy.store(true, std::sync::atomic::Ordering::Release);
+        }
+        0
+    }
+}
+
+rpi_plugin_sdk::event_handler! {
+    fn on_agent_end(_event, _user_data) {
+        if let Some(hub) = host::current() {
+            hub.busy.store(false, std::sync::atomic::Ordering::Release);
         }
         0
     }
