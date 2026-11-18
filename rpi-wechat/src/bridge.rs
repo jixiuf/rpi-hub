@@ -460,6 +460,24 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
                     }
                     match incoming.kind.as_str() {
                         "text" => {
+                            // Phone commands first (exact whitelist): they
+                            // reply directly over WeChat and never touch the
+                            // agent lane or the accumulation batch.
+                            if let Some(command) = crate::wx_commands::parse(&incoming.text) {
+                                let reply = match crate::wx_commands::execute(&hub, command) {
+                                    Ok(text) => text,
+                                    Err(error) => format!("❌ {error}"),
+                                };
+                                let _ = ctx
+                                    .client
+                                    .send_text(
+                                        &ctx.user_id,
+                                        &reply,
+                                        context_token.as_deref(),
+                                    )
+                                    .await;
+                                continue;
+                            }
                             handle_text(Arc::clone(&hub), &ctx, incoming.text.clone(), &mut batch)
                                 .await;
                         }

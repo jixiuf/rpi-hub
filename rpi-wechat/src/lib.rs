@@ -22,6 +22,7 @@ mod media;
 mod outbound;
 pub mod qr;
 mod state;
+mod wx_commands;
 
 
 pub use error::IlinkError;

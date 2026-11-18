@@ -4,7 +4,6 @@
 //! side anchors to THIS ordering (list_instances order: presence rows as the
 //! store returns them, deduped; the store's ORDER BY is stable).
 
-use crate::api::HubStore;
 use crate::store::InstanceView;
 
 /// One rendered row: `1. name@host（标注） 忙  /cwd`.
