@@ -528,17 +528,47 @@ pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
     let mut kind = "text".to_string();
     let mut image: Option<ImagePayload> = None;
     let mut file: Option<FilePayload> = None;
+    let mut voice: Option<String> = None;
     if let Some(items) = raw.get("item_list").and_then(|v| v.as_array()) {
         for item in items {
             let item_type = item.get("type").and_then(|v| v.as_i64()).unwrap_or(0);
             match item_type {
                 1 => {
                     if text.is_none() {
-                        text = item
+                        // A quoted/replied-to message arrives as ref_msg with
+                        // the original text nested one level down; surface it
+                        // as a prefix so the agent sees what is being replied
+                        // to (same shape as the reference implementation).
+                        let quoted = item
+                            .get("ref_msg")
+                            .and_then(|r| r.get("message_item"))
+                            .and_then(|m| m.get("text_item"))
+                            .and_then(|t| t.get("text"))
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|t| !t.is_empty())
+                            .map(str::to_string);
+                        let own = item
                             .get("text_item")
                             .and_then(|t| t.get("text"))
                             .and_then(|v| v.as_str())
                             .map(str::to_string);
+                        text = match (quoted, own) {
+                            (Some(quoted), Some(own)) => Some(format!("[引用: {quoted}]\n{own}")),
+                            (Some(quoted), None) => Some(format!("[引用: {quoted}]")),
+                            (None, own) => own,
+                        };
+                    }
+                }
+                3 => {
+                    kind = "voice".to_string();
+                    if voice.is_none() {
+                        voice = item
+                            .get("voice_item")
+                            .and_then(|v| v.get("text"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .filter(|t| !t.trim().is_empty());
                     }
                 }
                 2 => {
@@ -616,7 +646,6 @@ pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
                         });
                     }
                 }
-                3 => kind = "voice".to_string(),
                 5 => kind = "video".to_string(),
                 _ => {}
             }
@@ -630,6 +659,7 @@ pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
         text: text.unwrap_or_default(),
         image,
         file,
+        voice,
     })
 }
 
@@ -645,6 +675,9 @@ pub struct Incoming {
     pub image: Option<ImagePayload>,
     /// File: CDN param + base64-wrapped key + original name.
     pub file: Option<FilePayload>,
+    /// Voice transcript (`voice_item.text`), when the iLink server managed to
+    /// transcribe the speech. `None` for voice messages it could not.
+    pub voice: Option<String>,
 }
 
 /// An image attachment ready for download.
@@ -798,6 +831,79 @@ mod tests {
         });
         let incoming = normalize_msg(&image).unwrap();
         assert_eq!(incoming.kind, "image");
+        assert_eq!(incoming.text, "");
+    }
+
+    #[test]
+    fn normalize_prefixes_the_quoted_message() {
+        // Reply-with-quote: the original text arrives in ref_msg nested under
+        // message_item; the agent must see what is being replied to.
+        let quoted = serde_json::json!({
+            "message_type": 1,
+            "from_user_id": "u1",
+            "context_token": "ctx",
+            "item_list": [{
+                "type": 1,
+                "ref_msg": {"message_item": {"type": 1,
+                    "text_item": {"text": " 明天几点开会 "}}},
+                "text_item": {"text": "帮我加到日历"}
+            }]
+        });
+        let incoming = normalize_msg(&quoted).unwrap();
+        assert_eq!(incoming.kind, "text");
+        assert_eq!(incoming.text, "[引用: 明天几点开会]\n帮我加到日历");
+
+        // Quote without own text (empty reply): the quote alone survives.
+        let quote_only = serde_json::json!({
+            "message_type": 1,
+            "from_user_id": "u1",
+            "item_list": [{
+                "type": 1,
+                "ref_msg": {"message_item": {"type": 1,
+                    "text_item": {"text": "昨天的问题"}}}
+            }]
+        });
+        let incoming = normalize_msg(&quote_only).unwrap();
+        assert_eq!(incoming.text, "[引用: 昨天的问题]");
+
+        // Plain text is untouched (no ref_msg wrapper).
+        let plain = serde_json::json!({
+            "message_type": 1,
+            "from_user_id": "u1",
+            "item_list": [{"type": 1, "text_item": {"text": "hello"}}]
+        });
+        let incoming = normalize_msg(&plain).unwrap();
+        assert_eq!(incoming.text, "hello");
+    }
+
+    #[test]
+    fn normalize_extracts_the_voice_transcript() {
+        // The iLink server ships the speech transcript in voice_item.text.
+        let voiced = serde_json::json!({
+            "message_type": 1,
+            "from_user_id": "u1",
+            "context_token": "ctx",
+            "item_list": [
+                {"type": 3, "voice_item": {"text": "帮我看看明天的日程"}}
+            ]
+        });
+        let incoming = normalize_msg(&voiced).unwrap();
+        assert_eq!(incoming.kind, "voice");
+        assert_eq!(incoming.voice.as_deref(), Some("帮我看看明天的日程"));
+
+        // No transcript (or a blank one): kind still marks voice, text stays
+        // empty — the bridge tells the user instead of injecting nothing.
+        let untranscribed = serde_json::json!({
+            "message_type": 1,
+            "from_user_id": "u1",
+            "item_list": [
+                {"type": 3, "voice_item": {"text": "   "}},
+                {"type": 3}
+            ]
+        });
+        let incoming = normalize_msg(&untranscribed).unwrap();
+        assert_eq!(incoming.kind, "voice");
+        assert_eq!(incoming.voice, None);
         assert_eq!(incoming.text, "");
     }
 

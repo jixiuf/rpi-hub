@@ -7,9 +7,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rpi_hub_core::protocol::{Envelope, EnvelopeKind};
-use rpi_hub_core::store::{Claim, Heartbeat};
 use rpi_hub_core::now_ms;
+use rpi_hub_core::protocol::{Envelope, EnvelopeKind};
+use rpi_hub_core::store::Heartbeat;
 use rpi_plugin_sdk::RuntimeActionId;
 
 use crate::host::{self, Hub, ALIVE_MS};
@@ -18,7 +18,6 @@ use crate::intent;
 const HEARTBEAT: Duration = Duration::from_secs(3);
 const DISPATCH: Duration = Duration::from_millis(300);
 const CONTEXT: Duration = Duration::from_secs(15);
-const LEASE: Duration = Duration::from_secs(5);
 const PRUNE: Duration = Duration::from_secs(60);
 
 /// Longest a `hub_ask` waits for the target's reply.
@@ -29,12 +28,22 @@ pub fn run(hub: Arc<Hub>) {
         hub.record_error(format!("cannot register instance: {error}"));
         return;
     }
-    hub.set_status(&format!("hub ✓ {}", hub.name()));
+    // The hub slot identifies THIS instance and the relay mode. Local mode
+    // shows just the full name (instance count carries no actionable info);
+    // relay/client append the mode, since cross-machine behavior changes.
+    // 💻 marks the hub (compute node); 📡 marks cross-machine mode — a relay
+    // serves other nodes, a client reaches a remote one. Local mode shows
+    // just 💻 + identity (no cross-machine fact to announce).
+    let mode_glyph = match hub.config.remote.mode {
+        rpi_hub_core::config::RemoteMode::Relay => "📡️",
+        rpi_hub_core::config::RemoteMode::Client => "💻",
+        rpi_hub_core::config::RemoteMode::Local => "🏠",
+    };
+    hub.set_status(&format!("{} {mode_glyph}", hub.label()));
 
     let mut next_beat = Instant::now();
     let mut next_dispatch = Instant::now();
     let mut next_context = Instant::now() + CONTEXT;
-    let mut next_lease = Instant::now();
     let mut next_prune = Instant::now() + PRUNE;
 
     loop {
@@ -57,10 +66,6 @@ pub fn run(hub: Arc<Hub>) {
         if now >= next_dispatch {
             dispatch(&hub);
             next_dispatch = now + DISPATCH;
-        }
-        if now >= next_lease {
-            lease_tick(&hub);
-            next_lease = now + LEASE;
         }
         if now >= next_prune {
             housekeeping(&hub);
@@ -179,11 +184,7 @@ fn handle_text(hub: &Arc<Hub>, envelope: &Envelope) {
         return;
     }
     if let Some(correlation) = &envelope.correlation {
-        let pending = hub
-            .pending
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .len();
+        let pending = hub.pending.lock().unwrap_or_else(|p| p.into_inner()).len();
         // Bound the pending list: stale asks must not grow without limit.
         if pending > 16 {
             hub.pending
@@ -241,11 +242,7 @@ fn handle_reply(hub: &Arc<Hub>, envelope: &Envelope) {
 fn reply(hub: &Arc<Hub>, envelope: &Envelope, ok: bool, text: String) {
     let Some(correlation) = envelope.correlation.clone() else {
         // Uncorrelated command: report through the local transcript.
-        let _ = hub.notice(&format!(
-            "{} {}",
-            if ok { "✓" } else { "✗" },
-            text
-        ));
+        let _ = hub.notice(&format!("{} {}", if ok { "✓" } else { "✗" }, text));
         return;
     };
     let reply = Envelope::reply(
@@ -259,65 +256,6 @@ fn reply(hub: &Arc<Hub>, envelope: &Envelope, ok: bool, text: String) {
     );
     if let Err(error) = hub.store.send_envelope(&reply) {
         host::log(&format!("reply delivery failed: {error}"));
-    }
-}
-
-fn lease_tick(hub: &Arc<Hub>) {
-    if !hub.config.channels.wechat.enabled {
-        return;
-    }
-    let now = now_ms();
-    let ttl = hub.config.lease.ttl_ms();
-    let mut held = hub.lease.lock().unwrap_or_else(|p| p.into_inner());
-    match held.as_mut() {
-        Some(lease) => {
-            let renewed = hub
-                .store
-                .renew_lease(
-                    &lease.capability,
-                    &hub.node_id,
-                    &hub.epoch,
-                    lease.generation,
-                    now,
-                    ttl,
-                )
-                .unwrap_or(false);
-            if renewed {
-                lease.expires_at = now + ttl;
-            } else {
-                host::log("wechat lease lost");
-                *held = None;
-                hub.set_status("hub ✓ (wechat released)");
-            }
-        }
-        None => {
-            if !hub.config.channels.wechat.auto_claim {
-                return;
-            }
-            match hub.store.claim_lease(
-                "wechat",
-                &hub.node_id,
-                &hub.name(),
-                &hub.epoch,
-                now,
-                ttl,
-            ) {
-                Ok(Claim::Granted {
-                    generation,
-                    expires_at,
-                }) => {
-                    host::log(&format!("wechat lease granted (generation {generation})"));
-                    *held = Some(host::HeldLease {
-                        capability: "wechat".to_string(),
-                        generation,
-                        expires_at,
-                    });
-                    hub.set_status(&format!("hub ✓ wechat@{}", hub.name()));
-                }
-                Ok(Claim::Held { .. }) => {}
-                Err(error) => host::log(&format!("lease claim failed: {error}")),
-            }
-        }
     }
 }
 
@@ -355,9 +293,7 @@ pub extern "C" fn finish_shutdown(_user_data: *mut std::ffi::c_void) -> i32 {
     };
     hub.request_shutdown();
     hub.stop_worker();
-    let _ = hub
-        .store
-        .unregister_instance(&hub.node_id, &hub.epoch);
+    let _ = hub.store.unregister_instance(&hub.node_id, &hub.epoch);
     hub.stop_backends();
     let _ = hub.action(
         RuntimeActionId::SetStatus,

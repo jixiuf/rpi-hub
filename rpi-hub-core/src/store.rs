@@ -163,8 +163,22 @@ pub struct Heartbeat {
 pub struct LeaseHolder {
     pub owner_node: String,
     pub owner_name: String,
+    /// The holder's machine, joined from `instances` (empty when the holder
+    /// is not currently present — the name then shows without @host).
+    pub owner_host: String,
     pub generation: i64,
     pub expires_at: i64,
+}
+
+impl LeaseHolder {
+    /// `name@host` when the host is known, else the bare name.
+    pub fn full_name(&self) -> String {
+        if self.owner_host.is_empty() {
+            self.owner_name.clone()
+        } else {
+            format!("{}@{}", self.owner_name, self.owner_host)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -550,6 +564,13 @@ impl Store {
                 }
             }
             Some((owner_node, owner_epoch, owner_name, generation, expires_at)) => {
+                let holder_host = tx
+                    .query_row(
+                        "SELECT host FROM instances WHERE node_id = ?1",
+                        params![owner_node],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap_or_default();
                 let same_owner = owner_node == node_id;
                 if same_owner {
                     // Reload resumption keeps the generation; a plain renewal
@@ -589,8 +610,9 @@ impl Store {
                 } else {
                     Claim::Held {
                         holder: LeaseHolder {
-                            owner_node,
+                            owner_node: owner_node.clone(),
                             owner_name,
+                            owner_host: holder_host,
                             generation,
                             expires_at,
                         },
@@ -808,16 +830,24 @@ impl Store {
 
     pub fn lease_holder(&self, capability: &str) -> Result<Option<LeaseHolder>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
+        // LEFT JOIN instances for the holder's host: the lease can outlive
+        // its holder's presence row (TTL 20s vs presence 30s windows), in
+        // which case the name degrades to the bare form.
         let holder = conn
             .query_row(
-                "SELECT owner_node, owner_name, generation, expires_at FROM leases WHERE capability = ?1",
+                "SELECT l.owner_node, l.owner_name,
+                        COALESCE(i.host, ''), l.generation, l.expires_at
+                   FROM leases l
+                   LEFT JOIN instances i ON i.node_id = l.owner_node
+                  WHERE l.capability = ?1",
                 params![capability],
                 |row| {
                     Ok(LeaseHolder {
                         owner_node: row.get(0)?,
                         owner_name: row.get(1)?,
-                        generation: row.get(2)?,
-                        expires_at: row.get(3)?,
+                        owner_host: row.get(2)?,
+                        generation: row.get(3)?,
+                        expires_at: row.get(4)?,
                     })
                 },
             )
@@ -828,7 +858,11 @@ impl Store {
     pub fn list_leases(&self) -> Result<Vec<(String, LeaseHolder)>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut statement = conn.prepare(
-            "SELECT capability, owner_node, owner_name, generation, expires_at FROM leases ORDER BY capability",
+            "SELECT l.capability, l.owner_node, l.owner_name,
+                    COALESCE(i.host, ''), l.generation, l.expires_at
+               FROM leases l
+               LEFT JOIN instances i ON i.node_id = l.owner_node
+              ORDER BY l.capability",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
@@ -836,8 +870,9 @@ impl Store {
                 LeaseHolder {
                     owner_node: row.get(1)?,
                     owner_name: row.get(2)?,
-                    generation: row.get(3)?,
-                    expires_at: row.get(4)?,
+                    owner_host: row.get(3)?,
+                    generation: row.get(4)?,
+                    expires_at: row.get(5)?,
                 },
             ))
         })?;

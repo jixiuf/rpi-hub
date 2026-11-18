@@ -19,6 +19,7 @@ pub mod error;
 pub mod names;
 pub mod paths;
 pub mod protocol;
+pub mod status;
 pub mod store;
 pub mod wire;
 

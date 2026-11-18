@@ -501,7 +501,19 @@ impl Hub {
     pub fn mark_stopped(&self) {
         self.running.store(false, Ordering::Release);
         *self.outbound.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        self.set_status("wx ✗ 停止");
+        // Show WHO holds the lease now when this bridge stopped because it
+        // was fenced (`/use` hand-off); a plain ✗ only for a real stop. The
+        // wechat claim uses this plugin's plain node_id (see claim_wechat).
+        let holder = self
+            .store
+            .lease_holder("wechat")
+            .ok()
+            .flatten()
+            .filter(|h| h.owner_node != self.node_id);
+        match holder {
+            Some(h) => self.set_status(&rpi_hub_core::status::status_remote(&h.full_name())),
+            None => self.set_status(&rpi_hub_core::status::status_stopped("停止")),
+        }
     }
 
     /// Stop the bridge thread (bounded by the lifecycle finish budget).

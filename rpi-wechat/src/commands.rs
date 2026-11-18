@@ -66,6 +66,12 @@ fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String>
     match hub.claim_wechat().map_err(|e| e.to_string())? {
         rpi_hub_core::store::Claim::Granted { .. } => {}
         rpi_hub_core::store::Claim::Held { holder } => {
+            // Another instance answers WeChat right now. The STATUS line must
+            // say so (○ + holder) — the user's TUI has no other source for
+            // this fact, and the old code left a stale `wx ✓ <me>` from a
+            // previous run next to the hub plugin's `○ <holder>`, which read
+            // as a contradiction. The bridge does NOT start here.
+            hub.set_status(&rpi_hub_core::status::status_remote(&holder.full_name()));
             return Err(format!(
                 "微信被 {} 持有（/use 切换后重试，或等待其 TTL 过期）",
                 holder.owner_name
@@ -100,7 +106,7 @@ fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String>
             status_hub.mark_stopped();
         })
         .map_err(|e| e.to_string())?;
-    hub.set_status(&format!("wx ✓ {}", hub.name()));
+    hub.set_status(&rpi_hub_core::status::status_local(&hub.label()));
     Ok(())
 }
 
@@ -410,10 +416,17 @@ pub fn spawn_watcher(hub: &Arc<Hub>, credentials: Credentials) {
                         "watcher: wechat held by {} (gen {})",
                         holder.owner_name, holder.generation
                     ));
+                    // Keep the wechat slot truthful while another instance
+                    // holds the lease: without this, a slot left over from a
+                    // fenced bridge (e.g. '○ <old-holder>') or an even older
+                    // '● wx <me>' would sit in the footer forever — this
+                    // process runs nothing else that would refresh it.
+                    thread_hub.set_status(&rpi_hub_core::status::status_remote(
+                        &holder.full_name(),
+                    ));
                 }
                 match claim_result {
                     Ok(rpi_hub_core::store::Claim::Granted { .. }) => {
-                        host::log("watcher: lease free — taking over the channel");
                         host::log("watcher: lease free — taking over the channel");
                         if let Err(error) =
                             spawn_bridge_public(&thread_hub, &credentials)

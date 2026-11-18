@@ -174,7 +174,9 @@ fn truncate_field(text: &str) -> String {
     if text.chars().count() <= MAX_FIELD_CHARS {
         return text.to_string();
     }
-    let cut: String = text.chars().take(MAX_FIELD_CHARS).collect();
+    // Total length INCLUDING the ellipsis stays at MAX_FIELD_CHARS (the SDK
+    // contract: a field is at most 256 characters, not 257).
+    let cut: String = text.chars().take(MAX_FIELD_CHARS - 1).collect();
     format!("{cut}…")
 }
 
@@ -196,15 +198,16 @@ mod tests {
             .collect();
         assert_eq!(cap_rows(many).len(), MAX_ITEMS);
 
-        // A >MAX_FIELD_CHARS CJK value is truncated on char boundaries with an
-        // ellipsis marker, never mid-codepoint.
+        // A >MAX_FIELD_CHARS CJK value is truncated to exactly
+        // MAX_FIELD_CHARS characters including the ellipsis marker, never
+        // mid-codepoint.
         let rows = vec![serde_json::json!({
             "value": "值".repeat(MAX_FIELD_CHARS + 50),
             "label": "x",
         })];
         let capped = cap_rows(rows);
         let value = capped[0].get("value").and_then(|v| v.as_str()).unwrap();
-        assert_eq!(value.chars().count(), MAX_FIELD_CHARS + 1); // + `…`
+        assert_eq!(value.chars().count(), MAX_FIELD_CHARS); // incl. `…`
         assert!(value.ends_with('…'));
     }
 

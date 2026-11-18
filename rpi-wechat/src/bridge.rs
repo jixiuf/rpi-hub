@@ -196,7 +196,8 @@ pub async fn run(
 ) -> StopReason {
     // Shared cursor from the DB: a hand-off mid-poll never replays or splits
     // messages, because whoever polls next continues from the advanced cursor.
-    let mut cursor = hub.store
+    let mut cursor = hub
+        .store
         .get_cursor()
         .or(Some(ctx.cursor.clone()))
         .unwrap_or_default();
@@ -243,7 +244,7 @@ pub async fn run(
             hub.record_error("wechat: lease lost (fenced or expired)");
             return StopReason::LeaseLost;
         }
-        hub.set_status(&format!("wx ✓ {}", hub.name()));
+        hub.set_status(&rpi_hub_core::status::status_local(&hub.label()));
 
         // ---- pending (stale-token) chunks first ----
         if !pending_chunks.is_empty() && context_token.is_some() {
@@ -321,12 +322,9 @@ pub async fn run(
                             let key = payload.aes_key.clone();
                             let media_dir = media_dir_of(&hub);
                             let downloaded = async {
-                                let (bytes, _media_type) = crate::media::download_image(
-                                    &download,
-                                    &url,
-                                    key.as_deref(),
-                                )
-                                .await?;
+                                let (bytes, _media_type) =
+                                    crate::media::download_image(&download, &url, key.as_deref())
+                                        .await?;
                                 let data = crate::ilink::base64_encode(&bytes);
                                 crate::media::save_to_disk(&media_dir, "image.jpg", &bytes)?;
                                 Ok::<String, IlinkError>(data)
@@ -384,11 +382,8 @@ pub async fn run(
                                     key.as_deref(),
                                 )
                                 .await?;
-                                let path = crate::media::save_to_disk(
-                                    &media_dir,
-                                    &name_for_save,
-                                    &bytes,
-                                )?;
+                                let path =
+                                    crate::media::save_to_disk(&media_dir, &name_for_save, &bytes)?;
                                 Ok((bytes, path))
                             }
                             .await;
@@ -399,10 +394,8 @@ pub async fn run(
                                         size: bytes.len(),
                                         path: path.display().to_string(),
                                     });
-                                    let _ = hub.notice(&format!(
-                                        "📨 微信文件已接收: {}",
-                                        path.display()
-                                    ));
+                                    let _ = hub
+                                        .notice(&format!("📨 微信文件已接收: {}", path.display()));
                                     let kb = (bytes.len() as f64 / 1024.0 * 10.0).round() / 10.0;
                                     let _ = ctx
                                         .client
@@ -427,6 +420,47 @@ pub async fn run(
                                         .await;
                                 }
                             }
+                        }
+                        "voice" => {
+                            // The iLink server transcribes voice messages;
+                            // inject the transcript like any other text (with
+                            // a marker so the agent knows the origin). Without
+                            // a transcript there is nothing to act on — tell
+                            // the user instead of silently dropping it.
+                            match incoming.voice.as_deref() {
+                                Some(transcript) => {
+                                    drain_inbound(
+                                        Arc::clone(&hub),
+                                        &ctx,
+                                        format!("[语音转文字] {transcript}"),
+                                        std::mem::take(&mut batch_images),
+                                        std::mem::take(&mut accumulated_files),
+                                    )
+                                    .await;
+                                }
+                                None => {
+                                    let _ = hub.notice("📨 微信语音：无转写文本");
+                                    let _ = ctx
+                                        .client
+                                        .send_text(
+                                            &ctx.user_id,
+                                            "⚠ 语音没能转成文字，请改用文字或图片说明需求",
+                                            context_token.as_deref(),
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+                        "video" => {
+                            let _ = hub.notice("📨 微信视频已接收（暂不支持查看）");
+                            let _ = ctx
+                                .client
+                                .send_text(
+                                    &ctx.user_id,
+                                    "⚠ 视频暂不支持，请改用文字或图片说明需求",
+                                    context_token.as_deref(),
+                                )
+                                .await;
                         }
                         other => {
                             let _ = hub.notice(&format!("（微信收到{other}消息，暂不支持）"));
@@ -475,7 +509,11 @@ pub async fn run(
                     None,
                 )
                 .await;
-            hub.set_status("wx ⚠ 等待用户消息刷新");
+            // Degraded, not stopped: the lease is still ours and the bridge
+            // runs, but replies cannot go out until the user's next inbound
+            // message refreshes the context token. 🟡 keeps the holder color
+            // vocabulary (yellow = degraded) without a second glyph.
+            hub.set_status(&rpi_hub_core::status::status_degraded(&hub.label()));
         }
         if sent_count > 0 {
             host::log(&format!("outbound drained {} chunks", sent_count));
