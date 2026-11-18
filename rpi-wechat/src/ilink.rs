@@ -502,125 +502,194 @@ pub struct QrStatus {
 /// Normalize a raw `getupdates` msg into the fields the bridge needs.
 /// Only `message_type == 1` (user) messages are accepted; the bridge checks
 /// the sender against the bound user.
+// ---------------------------------------------------------------- wire model
+//
+// Typed view of an update's `item_list`. The tag is a plain number on the
+// wire (1 text, 2 image, 3 voice, 4 file, 5 video, …) and NEW types appear
+// without notice, so the item is a struct of optional payloads rather than a
+// tagged enum — an unknown tag deserializes with all-None fields and the
+// normalization fold simply skips it.
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct WireItem {
+    #[serde(rename = "type")]
+    pub kind: i64,
+    pub text_item: Option<TextBody>,
+    pub image_item: Option<ImageBody>,
+    pub voice_item: Option<VoiceBody>,
+    pub file_item: Option<FileBody>,
+    pub ref_msg: Option<RefMsg>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct TextBody {
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct ImageBody {
+    /// Download URL — `media.full_url` ONLY (other fields belong to other
+    /// message styles; mixing yields the file endpoint and a wrong key).
+    pub media: Option<CdnMedia>,
+    /// Hex key (NOT the file item's base64-wrapped `aes_key`).
+    pub aeskey: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct CdnMedia {
+    pub full_url: Option<String>,
+    pub encrypt_query_param: Option<String>,
+    pub aes_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct VoiceBody {
+    /// Server-side transcript, when transcription succeeded.
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct FileBody {
+    pub media: Option<CdnMedia>,
+    pub file_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct RefMsg {
+    /// The quoted message is a full item (type + text_item…), not a bare
+    /// body; only its text matters here.
+    pub message_item: Option<Box<WireItem>>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+struct WireUpdate {
+    #[serde(rename = "message_type")]
+    kind: i64,
+    #[serde(rename = "from_user_id")]
+    from: String,
+    #[serde(rename = "msg_id")]
+    msg_id: Option<String>,
+    #[serde(rename = "client_id")]
+    client_id: Option<String>,
+    #[serde(rename = "context_token")]
+    context_token: String,
+    #[serde(rename = "item_list")]
+    items: Vec<WireItem>,
+}
+
 pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
-    let message_type = raw.get("message_type").and_then(|v| v.as_i64())?;
-    if message_type != 1 {
+    let wire: WireUpdate = serde_json::from_value(raw.clone()).ok()?;
+    if wire.kind != 1 {
         return None;
     }
-    let from = raw
-        .get("from_user_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let message_id = raw
-        .get("msg_id")
-        .and_then(|v| v.as_str())
-        .or_else(|| raw.get("client_id").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .to_string();
-    let context_token = raw
-        .get("context_token")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    // First text item wins; media items carry their download parameters.
-    let mut text: Option<String> = None;
-    let mut kind = "text".to_string();
-    let mut image: Option<ImagePayload> = None;
-    let mut file: Option<FilePayload> = None;
-    let mut voice: Option<String> = None;
-    if let Some(items) = raw.get("item_list").and_then(|v| v.as_array()) {
-        for item in items {
-            let item_type = item.get("type").and_then(|v| v.as_i64()).unwrap_or(0);
-            match item_type {
-                1 => {
-                    if text.is_none() {
-                        // A quoted/replied-to message arrives as ref_msg with
-                        // the original text nested one level down; surface it
-                        // as a prefix so the agent sees what is being replied
-                        // to (same shape as the reference implementation).
-                        let quoted = item
-                            .get("ref_msg")
-                            .and_then(|r| r.get("message_item"))
-                            .and_then(|m| m.get("text_item"))
-                            .and_then(|t| t.get("text"))
-                            .and_then(|v| v.as_str())
-                            .map(str::trim)
-                            .filter(|t| !t.is_empty())
-                            .map(str::to_string);
-                        let own = item
-                            .get("text_item")
-                            .and_then(|t| t.get("text"))
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                        text = match (quoted, own) {
-                            (Some(quoted), Some(own)) => Some(format!("[引用: {quoted}]\n{own}")),
-                            (Some(quoted), None) => Some(format!("[引用: {quoted}]")),
-                            (None, own) => own,
-                        };
-                    }
+    let mut state = NormalizeState::default();
+    for item in &wire.items {
+        state.fold(item);
+    }
+    Some(Incoming {
+        message_id: wire.msg_id.or(wire.client_id).unwrap_or_default(),
+        from_user: wire.from,
+        context_token: wire.context_token,
+        kind: state.kind.to_string(),
+        text: state.text.unwrap_or_default(),
+        image: state.image,
+        file: state.file,
+        voice: state.voice,
+    })
+}
+
+/// First-wins fold over the item list: text (with quoted prefix), image,
+/// file, voice; the FIRST media kind seen names the message kind.
+struct NormalizeState {
+    text: Option<String>,
+    kind: &'static str,
+    image: Option<ImagePayload>,
+    file: Option<FilePayload>,
+    voice: Option<String>,
+}
+
+impl Default for NormalizeState {
+    fn default() -> Self {
+        Self {
+            text: None,
+            kind: "text",
+            image: None,
+            file: None,
+            voice: None,
+        }
+    }
+}
+
+impl NormalizeState {
+    fn fold(&mut self, item: &WireItem) {
+        match item.kind {
+            1 => {
+                if self.text.is_none() {
+                    let quoted = item
+                        .ref_msg
+                        .as_ref()
+                        .and_then(|r| r.message_item.as_deref())
+                        .and_then(|m| m.text_item.as_ref())
+                        .and_then(|t| t.text.as_deref())
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_string);
+                    let own = item.text_item.as_ref().and_then(|t| t.text.clone());
+                    self.text = match (quoted, own) {
+                        (Some(quoted), Some(own)) => {
+                            Some(format!("[引用: {quoted}]\n{own}"))
+                        }
+                        (Some(quoted), None) => Some(format!("[引用: {quoted}]")),
+                        (None, own) => own,
+                    };
                 }
-                3 => {
-                    kind = "voice".to_string();
-                    if voice.is_none() {
-                        voice = item
-                            .get("voice_item")
-                            .and_then(|v| v.get("text"))
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string)
-                            .filter(|t| !t.trim().is_empty());
-                    }
-                }
-                2 => {
-                    // Reference implementation: URL comes from
-                    // image_item.media.full_url ONLY, and the key from
-                    // image_item.aeskey ONLY (hex). The other fields belong to
-                    // different message styles — mixing them yields the file
-                    // download endpoint and a wrong key.
-                    if std::env::var("RPI_HUB_DEBUG").ok().as_deref() == Some("1") {
-                        eprintln!(
-                            "[ilink] image_item={}",
-                            item.get("image_item")
-                                .map(|v| v.to_string())
-                                .unwrap_or_default()
-                        );
-                    }
-                    if image.is_none() {
-                        kind = "image".to_string();
-                        let image_item = item.get("image_item");
-                        let url = image_item
-                            .and_then(|i| i.get("media"))
-                            .and_then(|m| m.get("full_url"))
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                        let key = image_item
-                            .and_then(|i| i.get("aeskey"))
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                        if let Some(url) = url {
-                            image = Some(ImagePayload { url, aes_key: key });
+            }
+            2 => {
+                // The tag names the kind even without a usable payload (the
+                // old hand-written fold did the same).
+                self.kind = "image";
+                if self.image.is_none() {
+                    if let Some(image) = item.image_item.as_ref() {
+                        if let Some(url) = image.media.as_ref().and_then(|m| m.full_url.clone()) {
+                            self.image = Some(ImagePayload {
+                                url,
+                                aes_key: image.aeskey.clone(),
+                            });
                         }
                     }
                 }
-                4 => {
-                    if file.is_none() {
-                        kind = "file".to_string();
-                        let file_item = item.get("file_item");
-                        let media = file_item.and_then(|f| f.get("media"));
-                        let param = media
-                            .and_then(|m| m.get("encrypt_query_param"))
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                        let full_url = file_item
-                            .and_then(|f| f.get("media"))
-                            .and_then(|m| m.get("full_url"))
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string)
+            }
+            3 => {
+                self.kind = "voice";
+                if self.voice.is_none() {
+                    self.voice = item
+                        .voice_item
+                        .as_ref()
+                        .and_then(|v| v.text.clone())
+                        .filter(|t| !t.trim().is_empty());
+                }
+            }
+            4 => {
+                self.kind = "file";
+                if self.file.is_none() {
+                    if let Some(file) = item.file_item.as_ref() {
+                        let media = file.media.clone().unwrap_or_default();
+                        let full_url = media
+                            .full_url
+                            .clone()
                             .unwrap_or_else(|| {
                                 // Fallback: build from param (already encoded).
                                 media
-                                    .and_then(|m| m.get("encrypt_query_param"))
-                                    .and_then(|v| v.as_str())
+                                    .encrypt_query_param
+                                    .as_deref()
                                     .map(|p| {
                                         format!(
                                             "{}?encrypted_query_param={p}",
@@ -629,38 +698,22 @@ pub fn normalize_msg(raw: &Value) -> Option<Incoming> {
                                     })
                                     .unwrap_or_default()
                             });
-                        let key = media
-                            .and_then(|m| m.get("aes_key"))
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                        let name = file_item
-                            .and_then(|f| f.get("file_name"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("file")
-                            .to_string();
-                        file = Some(FilePayload {
-                            encrypt_param: param.unwrap_or_default(),
+                        self.file = Some(FilePayload {
+                            encrypt_param: media.encrypt_query_param.unwrap_or_default(),
                             full_url,
-                            aes_key: key,
-                            file_name: name,
+                            aes_key: media.aes_key.clone(),
+                            file_name: file
+                                .file_name
+                                .clone()
+                                .unwrap_or_else(|| "file".to_string()),
                         });
                     }
                 }
-                5 => kind = "video".to_string(),
-                _ => {}
             }
+            5 => self.kind = "video",
+            _ => {} // unknown item type: tolerated, skipped
         }
     }
-    Some(Incoming {
-        message_id,
-        from_user: from,
-        context_token,
-        kind,
-        text: text.unwrap_or_default(),
-        image,
-        file,
-        voice,
-    })
 }
 
 /// Normalized inbound message.
