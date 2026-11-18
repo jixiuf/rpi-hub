@@ -736,59 +736,18 @@ fn urlencode(value: &str) -> String {
     out
 }
 
-/// Standard base64 (no line breaks). Kept local to avoid pulling the `base64`
-/// crate for one call site — the alphabet is stable.
-/// Standard base64 decode (accepts padding; ignores whitespace).
+/// Standard base64 via the `base64` crate (padding accepted; whitespace is
+/// NOT — call sites trim before passing).
 pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
-    const INVALID: u8 = 255;
-    let mut table = [INVALID; 256];
-    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    for (index, &byte) in alphabet.iter().enumerate() {
-        table[byte as usize] = index as u8;
-    }
-    let mut out = Vec::with_capacity(text.len() / 4 * 3);
-    let mut buffer = 0u32;
-    let mut bits = 0u32;
-    for byte in text.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' => {
-                buffer = (buffer << 6) | table[byte as usize] as u32;
-                bits += 6;
-            }
-            b'=' | b'\r' | b'\n' | b' ' => continue,
-            _ => return None,
-        }
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buffer >> bits) as u8);
-        }
-    }
-    Some(out)
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(text.trim())
+        .ok()
 }
 
 pub fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [
-            chunk[0],
-            chunk.get(1).copied().unwrap_or(0),
-            chunk.get(2).copied().unwrap_or(0),
-        ];
-        out.push(TABLE[(b[0] >> 2) as usize] as char);
-        out.push(TABLE[(((b[0] & 0x03) << 4) | (b[1] >> 4)) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(((b[1] & 0x0f) << 2) | (b[2] >> 6)) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[(b[2] & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
 }
 
 // ------------------------------------------------------------------- serde
