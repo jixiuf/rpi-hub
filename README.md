@@ -76,6 +76,22 @@ rpi install --path ./rpi-wechat      # 微信文字通道
 /hub status|who|name <名>|leave
 ```
 
+## 微信手机命令
+
+绑定微信的实例（footer 💬）可直接处理微信里发的斜杠命令（精确匹配，
+不进模型、不耗 token；其它文本照常给 AI）：
+
+```
+/instances          实例列表（与 TUI 同序同格式）
+/use <编号|名字>    切换微信接管；自动回显目标实例状态
+/new                本实例开新会话
+/status             本实例状态（模型/会话/目录/忙闲/心跳/微信持有者）
+/help               命令列表
+```
+
+编号锚定 `/instances` 的顺序（跨机一致：列表来自共享的 hub.db / relay）。
+切换后自动回显目标实例状态（跨实例经 cmd/reply 信封，5s 超时降级）。
+
 ## 状态与配置
 
 ```
