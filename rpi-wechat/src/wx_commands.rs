@@ -30,6 +30,8 @@ pub enum WxCommand {
     New,
     /// `/status` — this instance's session facts (model/session/cwd/lease).
     Status,
+    /// `/help` — the command list.
+    Help,
 }
 
 /// Parse a trimmed inbound text. Exact-match whitelist:
@@ -49,6 +51,9 @@ pub fn parse(text: &str) -> Option<WxCommand> {
     }
     if text == "/status" {
         return Some(WxCommand::Status);
+    }
+    if text == "/help" {
+        return Some(WxCommand::Help);
     }
     if let Some(arg) = text.strip_prefix("/use ") {
         let arg = arg.trim();
@@ -83,9 +88,16 @@ pub fn instances_text(hub: &Arc<Hub>, now: i64) -> Result<String, String> {
     Ok(render_instances_text(&instances, &viewer, now, holder_triple))
 }
 
+/// Wait bound for the target's `/status` reply after a cross-instance hand-off.
+const STATUS_REPLY_WAIT_MS: u64 = 5_000;
+
 /// `/use <arg>`: resolve by NUMBER (anchored to `instances_text` order) or by
 /// name/label/prefix (same semantics as the TUI's resolve_target), then
-/// assign through `LeaseAdmin`. Returns the confirmation text.
+/// assign through `LeaseAdmin`. Returns the confirmation text followed by the
+/// target's /status: local targets render from the heartbeat row; remote
+/// targets get a `cmd status` envelope (their worker replies with the text,
+/// which this bridge thread polls for, bounded) — so the phone always shows
+/// what it just handed the channel to.
 pub fn use_command(hub: &Arc<Hub>, arg: &str) -> Result<String, String> {
     let now = rpi_hub_core::now_ms();
     let instances = hub
@@ -101,10 +113,56 @@ pub fn use_command(hub: &Arc<Hub>, arg: &str) -> Result<String, String> {
         hub.config.lease.ttl_ms(),
     );
     let generation = admin.assign_to("wechat", &target, now)?;
-    Ok(format!(
+    let confirmation = format!(
         "微信接管已切换到 {}（generation {generation}）",
         target.label()
-    ))
+    );
+    if target.node_id == hub.node_id {
+        return Ok(format!("{confirmation}\n\n{}", status_text(hub, now)));
+    }
+    match remote_status(hub, &target, now) {
+        Some(status) => Ok(format!("{confirmation}\n\n{status}")),
+        None => Ok(format!(
+            "{confirmation}\n（{}/status 暂未响应，稍后可用 /instances 查看）",
+            target.label()
+        )),
+    }
+}
+
+/// Ask a REMOTE instance for its status: a correlated `cmd status` envelope;
+/// the target's worker executes its intent and replies. Polls this node's
+/// inbox for the correlated reply and acks it. `None` on timeout.
+fn remote_status(hub: &Arc<Hub>, target: &rpi_hub_core::store::InstanceView, now: i64) -> Option<String> {
+    let correlation = rpi_hub_core::protocol::new_id();
+    let intent = rpi_hub_core::protocol::CommandIntent::new("status");
+    let envelope = rpi_hub_core::protocol::Envelope::command(
+        &hub.node_id,
+        &hub.name(),
+        &target.node_id,
+        intent,
+        now,
+    )
+    .with_correlation(&correlation);
+    hub.store.send_envelope(&envelope).ok()?;
+
+    let deadline = now + STATUS_REPLY_WAIT_MS as i64;
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let now_i = rpi_hub_core::now_ms();
+        if now_i >= deadline {
+            return None;
+        }
+        let inbox = hub.store.inbox(&hub.node_id, now_i, 32).ok()?;
+        for envelope in inbox {
+            if envelope.kind == rpi_hub_core::protocol::EnvelopeKind::Reply
+                && envelope.correlation.as_deref() == Some(correlation.as_str())
+            {
+                let _ = hub.store.ack_envelope(&envelope.id, &hub.node_id, now_i);
+                let text = envelope.text.unwrap_or_default();
+                return Some(text);
+            }
+        }
+    }
 }
 
 /// Number first (`/use 3` → the 3rd row of the rendered list), then the TUI's
@@ -176,6 +234,15 @@ pub fn status_text(hub: &Arc<Hub>, now: i64) -> String {
             "状态: {}",
             if view.busy { "忙（生成中）" } else { "空闲" }
         ));
+        // Session age is the cheap task identifier until a session-title
+        // action exists in the host ABI (see roadmap).
+        let up_minutes = (now.saturating_sub(view.started_at)) / 60_000;
+        let age = if up_minutes >= 60 {
+            format!("{}h{}m", up_minutes / 60, up_minutes % 60)
+        } else {
+            format!("{up_minutes}m")
+        };
+        lines.push(format!("启动: {age}前"));
         lines.push(format!(
             "心跳: {}s 前",
             (now - view.last_seen) / 1000
@@ -188,6 +255,15 @@ pub fn status_text(hub: &Arc<Hub>, now: i64) -> String {
     }
     lines.join("\n")
 }
+
+const HELP: &str = "微信命令（直接发送，不经过 AI）:\n\
+  /instances  实例列表（带编号）\n\
+  /use <编号|名字>  切换微信接管\n\
+  /use        查看列表+提示\n\
+  /new        本实例开新会话\n\
+  /status     本实例状态\n\
+  /help       本帮助\n\
+其它文本原样发给当前实例的 AI。";
 
 /// Execute a parsed command on the hub and return the reply text.
 pub fn execute(hub: &Arc<Hub>, command: WxCommand) -> Result<String, String> {
@@ -212,6 +288,7 @@ pub fn execute(hub: &Arc<Hub>, command: WxCommand) -> Result<String, String> {
             Ok(format!("已开启新会话 {session}"))
         }
         WxCommand::Status => Ok(status_text(hub, now)),
+        WxCommand::Help => Ok(HELP.to_string()),
     }
 }
 
@@ -224,6 +301,9 @@ mod tests {
         assert!(matches!(parse("/instances"), Some(WxCommand::Instances)));
         assert!(matches!(parse("  /instances  "), Some(WxCommand::Instances)));
         assert!(matches!(parse("/use"), Some(WxCommand::Use(None))));
+        assert!(matches!(parse("/new"), Some(WxCommand::New)));
+        assert!(matches!(parse("/status"), Some(WxCommand::Status)));
+        assert!(matches!(parse("/help"), Some(WxCommand::Help)));
         assert!(matches!(
             parse("/use 3"),
             Some(WxCommand::Use(Some(ref a))) if a == "3"
