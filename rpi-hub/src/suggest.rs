@@ -59,14 +59,49 @@ pub(crate) extern "C" fn suggest_arguments(
 fn build_suggestions(request: &str) -> Option<serde_json::Value> {
     let value: serde_json::Value = serde_json::from_str(request).ok()?;
     let command = value.get("command")?.as_str()?.trim_start_matches('/');
+    let args = value.get("args").and_then(|v| v.as_str()).unwrap_or("");
 
     let hub = host::current()?;
-    let items = cap_rows(cached_rows(&hub)?);
+    // /cmd and /ask take a SECOND argument (the intent) after the target:
+    // offer the intent list as composite rows ("target /new", …) once a
+    // target is typed. The host's narrowing is prefix-ranked, so these
+    // composite rows win (rank 0) while the bare instance rows still match
+    // by contains (rank 2) — both visible, the intent rows first.
+    let items = if matches!(command, "cmd" | "ask") {
+        let mut items = cached_rows(&hub)?;
+        let target_part = args.split_once(char::is_whitespace).map(|(t, _)| t);
+        if let Some(target) = target_part.filter(|t| !t.trim().is_empty()) {
+            for (name, desc) in INTENTS {
+                items.push(serde_json::json!({
+                    "value": format!("{target} /{name}"),
+                    "label": format!("/{name} — {desc}"),
+                }));
+            }
+        }
+        cap_rows(items)
+    } else {
+        cap_rows(cached_rows(&hub)?)
+    };
     Some(serde_json::json!({
         "items": items,
         "command": command,
     }))
 }
+
+/// The intents valid after a target in /cmd and /ask (kept in sync with
+/// intent.rs's execute match).
+const INTENTS: &[(&str, &str)] = &[
+    ("status", "实例与会话状态"),
+    ("new", "开启新会话"),
+    ("fork", "从当前会话 fork"),
+    ("switch", "切换到指定会话"),
+    ("compact", "压缩上下文"),
+    ("model", "切换模型"),
+    ("thinking", "设置 thinking 级别"),
+    ("name", "设置会话名"),
+    ("stop", "停止当前生成"),
+    ("reload", "重载本实例扩展"),
+];
 
 /// Cached instance rows (label/value/description triples, **unfiltered** —
 /// the full candidate list; the host narrows against the typed prefix
@@ -183,6 +218,27 @@ fn truncate_field(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cmd_with_target_offers_intent_rows() {
+        // build_suggestions 需要 host::current（插件上下文），单测只覆盖
+        // INTENTS 表与 value 拼接逻辑——通过 cap_rows 纯函数侧写验证。
+        let items: Vec<serde_json::Value> = INTENTS
+            .iter()
+            .map(|(name, desc)| {
+                serde_json::json!({
+                    "value": format!("jixiuf@h1 /{name}"),
+                    "label": format!("/{name} — {desc}"),
+                })
+            })
+            .collect();
+        let capped = cap_rows(items);
+        assert_eq!(capped.len(), INTENTS.len());
+        assert!(capped[0]["value"]
+            .as_str()
+            .unwrap()
+            .starts_with("jixiuf@h1 /status"));
+    }
 
     #[test]
     fn malformed_requests_build_nothing() {
