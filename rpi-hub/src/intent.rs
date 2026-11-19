@@ -30,11 +30,19 @@ pub fn execute(hub: &Hub, intent: &CommandIntent) -> Result<String, String> {
         "status" => status(hub),
         "new" => {
             let result = hub.action(RuntimeActionId::NewSession, serde_json::json!({}))?;
-            Ok(format!("已开启新会话 {}", session_id(&result)))
+            Ok(format!(
+                "{} 已开启新会话 {}",
+                hub.label(),
+                session_id(&result)
+            ))
         }
         "fork" => {
             let result = hub.action(RuntimeActionId::Fork, serde_json::json!({}))?;
-            Ok(format!("已 fork 出新会话 {}", session_id(&result)))
+            Ok(format!(
+                "{} 已 fork 出新会话 {}",
+                hub.label(),
+                session_id(&result)
+            ))
         }
         "switch" | "goto" | "session" => {
             let id = intent
