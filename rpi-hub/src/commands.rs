@@ -144,15 +144,28 @@ fn editor_payload(title: String, initial: &str) -> Reply {
 
 fn args_of(raw: StbStringRef) -> String {
     let text = unsafe { raw.as_str() }.to_string();
-    serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("args")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or(text)
+    let value: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(_) => return text,
+    };
+    // Normal invocation: {"args": "<text>"} — the host passes the tail as a
+    // JSON string. Use it verbatim.
+    if let Some(args) = value.get("args").and_then(|v| v.as_str()) {
+        return args.to_string();
+    }
+    // Editor re-entry (TUI's extension editor): {"action":"edit","text":
+    // "<what the user typed>"} — the text IS the argument tail. Without this
+    // branch the whole JSON object was treated as the tail, and split_target
+    // parsed the first JSON token as a target — the editor-submitted command
+    // never executed.
+    if value.get("action").and_then(|v| v.as_str()) == Some("edit") {
+        return value
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+    }
+    text
 }
 
 fn hub() -> Result<std::sync::Arc<Hub>, String> {
@@ -320,7 +333,9 @@ extern "C" fn cmd_cmd(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
         };
         let Some(command) = flow.text.clone().filter(|t| !t.trim().is_empty()) else {
             return Ok(editor_payload(
-                format!("发给 {target_query} 的指令（如 reload，不用带实例名）"),
+                format!(
+                    "发给 {target_query} 的指令（可用: status new fork switch <id> compact model <id> thinking <级别> name <名> stop reload help）"
+                ),
                 &flow.draft,
             ));
         };
