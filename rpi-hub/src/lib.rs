@@ -17,7 +17,6 @@ mod suggest;
 mod events;
 mod host;
 mod intent;
-mod remote;
 mod tools;
 mod worker;
 

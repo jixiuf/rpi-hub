@@ -95,26 +95,8 @@ pub enum RemoteMode {
 pub struct RemoteConfig {
     pub mode: RemoteMode,
     pub relay: RelayConfig,
-    /// Machines reachable over SSH, for `hub_run` (delegation to a host that has
-    /// no running rpi instance). The office machine dials out; the server never
-    /// dials back.
-    pub hosts: BTreeMap<String, RemoteHost>,
 }
 
-/// One SSH-reachable machine, used by `hub_run`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct RemoteHost {
-    /// `ssh` destination: a `~/.ssh/config` alias or `user@host`.
-    pub ssh: String,
-    /// Working directory on the remote machine (defaults to `$HOME`).
-    pub cwd: Option<String>,
-    /// rpi executable on the remote machine (defaults to `rpi`).
-    pub rpi: Option<String>,
-    pub port: Option<u16>,
-    /// Extra rpi arguments, e.g. `["--model", "gateway/model"]`.
-    pub args: Vec<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase", default)]

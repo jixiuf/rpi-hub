@@ -199,4 +199,28 @@ if grep -qiE "panic|rpi-hub disabled" "$WORK"/a.out "$WORK"/b.out; then
   exit 1
 fi
 
-echo "OK: presence, unique names, lease ownership, /instances and /use verified"
+# 6. Bidirectional mailbox: B → A. A server-side instance addresses A the
+# same way A addresses it (shared hub.db / relay): inject a text envelope
+# from B into A's mailbox and wait for A's worker to drain + ack it.
+marker="bidir-$$"
+node_a="$(sqlite3 "$DB" "SELECT node_id FROM instances WHERE name='$name_a';")"
+node_b="$(sqlite3 "$DB" "SELECT node_id FROM instances WHERE name='$name_b';")"
+now_ms="$(($(date +%s) * 1000))"
+payload="$(printf '{"id":"bidir-%s","kind":"text","fromNode":"%s","fromName":"%s","toNode":"%s","text":"bidirectional-marker","createdAt":%s,"expiresAt":%s}' "$$" "$node_b" "$name_b" "$node_a" "$now_ms" "$((now_ms + 120000))")"
+sqlite3 "$DB" "INSERT INTO envelopes (id, to_node, from_node, from_name, kind, payload, created_at, expires_at)
+  VALUES ('bidir-$$', '$node_a', '$node_b', '$name_b', 'text', '$payload', $now_ms, $((now_ms + 120000)));"
+deadline=$((SECONDS + 10))
+while (( SECONDS < deadline )); do
+  acked="$(sqlite3 "$DB" "SELECT acked_at FROM envelopes WHERE id='bidir-$$';" 2>/dev/null)"
+  [[ -n "$acked" ]] && break
+  sleep 0.3
+done
+acked="$(sqlite3 "$DB" "SELECT acked_at FROM envelopes WHERE id='bidir-$$';" 2>/dev/null)"
+echo "bidir_acked=$([ -n "$acked" ] && echo yes || echo no)"
+if [[ -z "$acked" ]]; then
+  echo "FAIL: B → A mailbox message was not drained+acked by A" >&2
+  sqlite3 "$DB" "SELECT id, to_node, acked_at FROM envelopes;" >&2
+  exit 1
+fi
+
+echo "OK: presence, unique names, lease ownership, /instances, /use, and bidirectional mailbox verified"

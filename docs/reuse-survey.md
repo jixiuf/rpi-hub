@@ -35,7 +35,7 @@
 **复用方式**：两条路可选，都不阻塞当前设计——
 1. 给 Web/ACP 适配器复用 `Service`（不是本插件目标）；
 2. 因为 `executable` 可配置，跨机"隔离委派"可以用**包一层 ssh 的可执行文件**跑 `rpi --mode rpc`，
-   不必自研协议。我们已经用更轻的方式实现了同一目的（见 §2 的 `hub_run`）。
+   不必自研协议。跨机协作最终收敛为 relay 信箱（双向），无实例的远端机器标准做法是先跑一个 rpi 实例。
 
 ### `rpi-orchestrator` / `rpi-subagents`
 有界 DAG / `ChildAgent` 子代理。**复用方式**：远端实例收到 `hub_ask` 后，自己可以再用 `delegate_task`
@@ -54,7 +54,7 @@ HTTP/SSE 与 ACP 前端，负责 `ownsStdio`、监听生命周期、认证（`RP
 | 跨机传输 | JSON-RPC 2.0 + token 的**约定**借鉴 `rpi-server`，自研 relay（TCP，RPC 可选跑在 HTTP 表单端口；出站方向：办公机连服务器，服务器不反向拨号） |
 | 身份/围栏 | 与 `rpi-node-core` 的 `node_id` + `owner_epoch` 对齐 |
 | 微信通道 | 形状对齐 `rpi-im-message`（动作式工具、配置优先级、有界队列、autoReply）；协议自分块参考 pi-wechat 的 `splitAndFilterMarkdown` |
-| 远端调研（无需 relay） | **`hub_run`**：`ssh <host> -- sh -lc 'cd "$1" && exec rpi -p "$(cat)"'`，任务从 stdin 传，避免 shell 注入；超时/kill、输出有上限。对应"没在跑实例的那台机器"，直接用它自己的 `~/.rpi` 配置和网络 |
-| 有实例在跑时 | `hub_send` / `hub_ask` 走信箱，保留对方会话上下文，不回退到新进程 |
+| 跨机调研（有实例） | `hub_send` / `hub_ask` 走信箱，保留对方会话上下文；双向对称（office⇄server 均可发起）|
+| 跨机（无实例） | 先在远端跑一个 rpi 实例（relay client 连回主 hub），再 `hub_ask`——一次性 ssh 任务通道（`hub_run`）已移除，系统无 ssh 依赖 |
 
 `hub_run` 覆盖没有实例在跑的机器（用远端自己的 `~/.rpi` 配置和网络）；有实例时优先 `hub_ask` 走信箱。relay 与 `hub_run` 均已真机验证。

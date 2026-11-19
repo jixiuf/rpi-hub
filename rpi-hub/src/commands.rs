@@ -23,7 +23,6 @@ pub fn registry() -> Vec<(&'static str, &'static str, CommandHandlerFn)> {
         ("msg", "给实例发消息：/msg <实例> <内容>", cmd_msg),
         ("cmd", "给实例发指令：/cmd <实例> <指令>", cmd_cmd),
         ("ask", "让实例调研并回结果：/ask <实例> <任务>", cmd_ask),
-        ("run", "在远端主机跑一次性任务：/run <主机> <任务>", cmd_run),
         ("hub", "hub 诊断：/hub status|who|name <名>|leave", cmd_hub),
         ("start", "本机启动新实例：/start [目录]（缺省=当前目录）", cmd_start),
         ("stop", "停止本机实例：/stop <编号|名字>", cmd_stop),
@@ -382,49 +381,6 @@ extern "C" fn cmd_ask(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
         Ok(Reply::Text(format!(
             "任务已交给 {}；结果会以通知形式返回",
             target.label()
-        )))
-    })();
-    finish(out, result)
-}
-
-extern "C" fn cmd_run(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
-    let args = args_of(raw);
-    let result = (|| -> Result<Reply, String> {
-        let hub = hub()?;
-        let (host_name, task) = split_target(&args);
-        if host_name.is_empty() || task.is_empty() {
-            return Err("用法: /run <主机> <任务>（主机来自 remoteHosts）".to_string());
-        }
-        let host = hub
-            .config
-            .remote
-            .hosts
-            .get(host_name)
-            .cloned()
-            .ok_or_else(|| {
-                let known: Vec<&str> = hub
-                    .config
-                    .remote
-                    .hosts
-                    .keys()
-                    .map(String::as_str)
-                    .collect();
-                if known.is_empty() {
-                    "未配置 remoteHosts；在 hub 配置 remote.hosts 里添加".to_string()
-                } else {
-                    format!("未知主机 {host_name:?}；已配置: {}", known.join(", "))
-                }
-            })?;
-        crate::remote::spawn(
-            hub.clone(),
-            host_name.to_string(),
-            host,
-            task.to_string(),
-            std::time::Duration::from_secs(600),
-            None,
-        );
-        Ok(Reply::Text(format!(
-            "已在 {host_name} 上启动任务；结果会以通知形式返回"
         )))
     })();
     finish(out, result)

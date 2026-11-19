@@ -120,19 +120,17 @@ UPDATE leases SET owner_node=?, owner_epoch=?, owner_name=?,
 
 默认 300s，上限 900s。目标在忙时 `SendUserMessage` 以 `deliverAs:"steer"` 排队。
 
-## 6.5 无实例的远端：`hub_run`
+## 6.5 双向信箱（含跨机）
 
-`hub_ask` 依赖目标机上有实例在跑；没有实例时用 `hub_run`（`remoteHosts` 配置）：
+`hub_ask`/`hub_send`/`hub_cmd` 的寻址是对称的：任何实例（本机或经 relay
+连入的远端）都能向任何其它实例的信箱投递——办公机→服务器和
+服务器→办公机走的是同一条信箱路径（共享 hub.db / relay RPC），不依赖
+ssh。worker 300ms 轮询自己的信箱并 ack，`reply` 按 correlation 回到
+发起方。
 
-```
-ssh -o BatchMode=yes -- <ssh> sh -lc 'cd "$1" || exit 70; shift; exec "$@" -p "$(cat)"' sh <cwd> <rpi> [args…]
-```
-
-- 任务走 **stdin**（`-p "$(cat)"`），既没有 argv 长度限制，也没有 shell 拼接/注入面；
-  cwd / rpi 路径 / 附加参数都作为位置参数传入并做字符白名单校验。
-- 超时 kill，stdout ≤1MiB、stderr ≤32KiB；结果回到等待中的 `hub_run`，或作为 `/run` 通知。
-- 语义差异要记住：一次性（除非远端自己 `--continue`），用远端机器的 `~/.rpi` 凭据与项目配置，
-  不共享调用方的会话上下文。有实例时优先 `hub_ask`。
+远端机器的标准接入方式：**在那台机器上跑一个 rpi 实例**（relay client
+连回主 hub），之后 `/instances` 可见、`hub_ask` 可委派、`/use` 可接管
+微信——不需要 ssh 一次性任务通道（`hub_run` 已移除）。
 
 ## 7. 失败模式
 

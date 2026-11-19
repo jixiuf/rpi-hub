@@ -233,15 +233,6 @@ fn definitions() -> Vec<ToolDef> {
             destroy: wait_destroy,
         },
         ToolDef {
-            name: "hub_run",
-            description: "Run a one-shot rpi task on an SSH-reachable machine that has no running instance (configured under remoteHosts). Use it when the work must happen in that machine's network. Prefer hub_ask when an instance there is already running: it keeps that conversation's context.",
-            parameters: r#"{"type":"object","properties":{"host":{"type":"string","description":"Key under remoteHosts in the hub config"},"task":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":10,"maximum":3600}},"required":["host","task"],"additionalProperties":false}"#,
-            execute: run_execute,
-            poll: wait_poll,
-            cancel: wait_cancel,
-            destroy: wait_destroy,
-        },
-        ToolDef {
             name: "hub_switch",
             description: "Move ownership of a channel (default wechat) to another instance. Only the owner talks to WeChat, so this is how the mobile connection follows you between machines.",
             parameters: r#"{"type":"object","properties":{"target":{"type":"string"},"capability":{"type":"string","description":"channel id, default wechat"}},"required":["target"],"additionalProperties":false}"#,
@@ -376,65 +367,6 @@ fn run_ask(params: &str) -> Result<(String, i64), String> {
     Ok((correlation, (timeout as i64) * 1000))
 }
 
-rpi_plugin_sdk::execute_handler! {
-    fn run_execute(_call_id, params) {
-        match run_remote(&params.to_string_lossy()) {
-            Ok((correlation, timeout_ms)) => WAIT.insert(WaitDrive {
-                correlation,
-                deadline: now_ms() + timeout_ms,
-                last_check: 0,
-            }),
-            Err(error) => SYNC.insert(SyncDrive { outcome: Some(Err(error)) }),
-        }
-    }
-}
-
-fn run_remote(params: &str) -> Result<(String, i64), String> {
-    let hub = require_hub()?;
-    let params = parse_params(params);
-    let host_name = param_str(&params, "host")?.to_string();
-    let task = param_str(&params, "task")?.to_string();
-    let host = hub
-        .config
-        .remote
-        .hosts
-        .get(&host_name)
-        .cloned()
-        .ok_or_else(|| {
-            let known: Vec<&str> = hub
-                .config
-                .remote
-                .hosts
-                .keys()
-                .map(String::as_str)
-                .collect();
-            if known.is_empty() {
-                "no remoteHosts configured; add one under remote.hosts in the hub config"
-                    .to_string()
-            } else {
-                format!("unknown host {host_name:?}; configured: {}", known.join(", "))
-            }
-        })?;
-    let timeout_s = params
-        .get("timeoutSeconds")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(DEFAULT_ASK_TIMEOUT_S)
-        .clamp(10, 3600);
-    let timeout = std::time::Duration::from_secs(timeout_s);
-
-    let correlation = rpi_hub_core::protocol::new_id();
-    hub.expect_reply(&correlation);
-    crate::remote::spawn(
-        hub.clone(),
-        host_name,
-        host,
-        task,
-        timeout,
-        Some(correlation.clone()),
-    );
-    // Give the wait drive a little room past the run deadline.
-    Ok((correlation, (timeout_s as i64) * 1000 + 10_000))
-}
 
 rpi_plugin_sdk::execute_handler! {
     fn switch_execute(_call_id, params) {

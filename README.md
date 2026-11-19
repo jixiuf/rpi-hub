@@ -2,15 +2,16 @@
 
 rpi 的多实例协同：实例发现、互相发消息/指令、任务委派，以及"哪个实例接微信"的可切换租约。
 
-设计目标来自实际用法：**一台办公机 + 一台服务器，办公机能 ssh 到服务器，反过来不行**；两台机器
-网络/环境不同，部分调研必须交给位于对应网络里的实例完成；微信同一时刻只能接一个实例，但接管者要能切换。
+设计目标来自实际用法：**一台办公机 + 一台服务器**；两台机器网络/环境不同，部分调研必须
+交给位于对应网络里的实例完成；微信同一时刻只能接一个实例，但接管者要能切换。
+跨机协作全程走 relay 信箱（双向：任何一侧实例都能 hub_ask 另一侧），不依赖 ssh。
 
 当前状态：**本地多实例 + 跨机 relay（自研 TCP/HTTP + token 鉴权，不依赖 ssh）已在真机验证**；微信文字通道 + 手机命令面板已上线；语音转写、引用消息、实例启停均已支持。
 
 ```
 rpi-hub/
 ├── rpi-hub-core/   # 共享库：身份、SQLite store、租约、信封协议、relay wire（无 ABI）
-├── rpi-hub/        # cdylib 插件：tools / 斜杠命令 / 事件 / 后台 worker / ssh 远端一次性任务
+├── rpi-hub/        # cdylib 插件：tools / 斜杠命令 / 事件 / 后台 worker / 实例启停
 └── rpi-wechat/     # cdylib 插件：微信文字通道（iLink，QR 登录）
 ```
 
@@ -27,7 +28,7 @@ rpi-hub/
 | `/reload` | 旧闭包可能继续跑 | 每次加载生成新 epoch，旧 epoch 写入被拒；租约按 `node_id` 原地续约 |
 | 远程指令 | 注入 `/__hub_reload` 让模型回合去 dispatch | 直接映射 host runtime action（`NewSession/Fork/Reload/…`） |
 | 任务结果回传 | `tasks.json` + `[TASK#N结果]` 文本约定 | correlation id + `TurnEnd`/`MessageEnd` 回包 |
-| 跨机 | SSH 轮询远程实例 + 远程 takeover 文件 | relay（token 鉴权，RPC 走 HTTP 表单端口）+ `hub_run`（ssh 一次性任务） |
+| 跨机 | SSH 轮询远程实例 + 远程 takeover 文件 | relay（token 鉴权，RPC 走 HTTP 表单端口）；信箱双向，无 ssh |
 
 因此这里没有 daemon、没有本地端口（单机时）、没有文件锁代码。
 
@@ -61,7 +62,6 @@ rpi install --path ./rpi-wechat      # 微信文字通道
 | `hub_send` | 把消息投进目标实例的 agent 输入队列（让它在自己网络/文件系统里干活） |
 | `hub_cmd` | 在目标实例执行 `new/fork/compact/reload/model/thinking/name/stop/status` |
 | `hub_ask` | 委派任务并等待目标实例的最终回答（跨网络调研的主力） |
-| `hub_run` | 在**没有跑实例**的 SSH 机器上跑一次性任务（`remoteHosts`，今天就能用） |
 | `hub_switch` | 把某个渠道（默认 `wechat`）的接管切到目标实例 |
 
 ## 斜杠命令
@@ -72,7 +72,6 @@ rpi install --path ./rpi-wechat      # 微信文字通道
 /msg <实例> <内容>          发消息
 /cmd <实例> <指令>          远程执行指令（结果以通知形式回到本会话）
 /ask <实例> <任务>          委派任务（结果以通知形式回到本会话）
-/run <主机> <任务>          远端一次性任务（remoteHosts，无需对方跑实例）
 /start [目录]               本机 tmux 启动新实例（缺省=当前实例目录；允许同目录多实例）
 /stop <实例|编号>           停止本机实例的 tmux（租约自动交还）
 /hub status|who|name <名>|leave
@@ -114,10 +113,7 @@ rpi install --path ./rpi-wechat      # 微信文字通道
   "lease": { "ttlSeconds": 20, "renewSeconds": 5, "resumeGraceSeconds": 10 },
   "remote": {
     "mode": "local",
-    "relay": {},
-    "hosts": {
-      "server": { "ssh": "me@server", "cwd": "/work/project", "rpi": "rpi" }
-    }
+    "relay": {}
   },
   "channels": { "wechat": { "enabled": true, "autoClaim": true } },
   "limits": { "maxTextBytes": 65536, "inboxBatch": 32 },
