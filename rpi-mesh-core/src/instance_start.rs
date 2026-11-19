@@ -280,23 +280,39 @@ pub fn stop(ctx: &SpawnContext<'_>, query: &str, now: i64) -> Result<String, Str
             target.host
         ));
     }
-    let (session, window) =
-        tmux_target_for(&ctx.spawn.tmux_command, &ctx.spawn.session_prefix, &target)?;
-    let target_spec = match &window {
-        Some(window) => format!("{session}:{window}"),
-        None => session.clone(),
-    };
-    let action = if window.is_some() {
-        "kill-window"
-    } else {
-        "kill-session"
-    };
-    let status = Command::new(&ctx.spawn.tmux_command)
-        .args([action, "-t", &target_spec])
-        .status()
-        .map_err(|error| format!("cannot run {}: {error}", ctx.spawn.tmux_command))?;
-    if !status.success() {
-        return Err(format!("{action} {target_spec} 失败（不存在？）"));
+    // Primary: find the instance's tmux pane BY PID (presence row pid —
+    // authoritative; window names are user-editable and not an ownership
+    // record). Fallback: the instance runs but owns no tmux pane (started
+    // outside tmux / detached from it) → SIGTERM the process directly.
+    let placement = tmux_target_for(&ctx.spawn.tmux_command, target.pid)?;
+    match placement {
+        Some((session, window, pane_id)) => {
+            // Always address the EXACT pane: "{session}:{window}.{pane_id}".
+            // A bare "{session}:" means "the session's CURRENT window" — the
+            // active one, which is usually the CALLER's own window (the
+            // self-kill bug). With the pane id the kill cannot hit anything
+            // but the pane that hosts the target pid.
+            let target_spec = format!("{session}:{window}.{pane_id}");
+            let status = Command::new(&ctx.spawn.tmux_command)
+                .args(["kill-pane", "-t", &target_spec])
+                .status()
+                .map_err(|error| format!("cannot run {}: {error}", ctx.spawn.tmux_command))?;
+            if !status.success() {
+                return Err(format!("kill-pane {target_spec} 失败（不存在？）"));
+            }
+        }
+        None => {
+            // Process exists (list_instances_alive guaranteed it) but owns
+            // no tmux pane: SIGTERM so the plugin lifecycle releases the
+            // wechat lease and unregisters cleanly.
+            let status = Command::new("kill")
+                .args(["-TERM", &target.pid.to_string()])
+                .status()
+                .map_err(|error| format!("cannot run kill: {error}"))?;
+            if !status.success() {
+                return Err(format!("kill -TERM {} 失败", target.pid));
+            }
+        }
     }
     Ok(format!("✅ 已停止 {}", target.label()))
 }
@@ -304,62 +320,71 @@ pub fn stop(ctx: &SpawnContext<'_>, query: &str, now: i64) -> Result<String, Str
 /// Find the tmux session whose cwd matches the target (not a name guess).
 /// Where the target instance runs: `(session, window)` discovered by cwd via
 /// list-windows (covers BOTH placements — dedicated sessions and windows).
-fn tmux_target_for(
-    tmux: &str,
-    prefix: &str,
-    target: &InstanceView,
-) -> Result<(String, Option<String>), String> {
+/// Resolve the tmux kill target for an instance **by pid** — the presence
+/// row's authoritative pid, never window-name conventions:
+/// a pane whose leading process is the instance pid (plain `rpi` command),
+/// or whose leading process is that pid's parent (a `sh -c "rpi; …"` wrapper).
+/// Returns `(session, window)`; window `None` means kill the whole session
+/// (the dedicated-session placement where the pane IS the session).
+fn tmux_target_for(tmux: &str, pid: u32) -> Result<Option<(String, String, String)>, String> {
     let output = Command::new(tmux)
         .args([
-            "list-windows",
+            "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{window_name}\t#{pane_current_path}",
+            "#{session_name}\t#{window_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}",
         ])
         .output()
         .map_err(|error| format!("cannot run {tmux}: {error}"))?;
     let text = String::from_utf8_lossy(&output.stdout);
     for line in text.lines() {
-        let mut parts = line.splitn(3, '\t');
-        let (Some(session), Some(window), Some(path)) = (parts.next(), parts.next(), parts.next())
-        else {
+        let mut parts = line.splitn(5, '\t');
+        let (Some(session), Some(window), Some(window_index), Some(pane_index), Some(pane_pid)) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
             continue;
         };
-        let is_ours = session.starts_with(&format!("{prefix}-")) || window == names_from(target);
-        if is_ours && Path::new(path) == Path::new(&target.cwd) {
-            return Ok((session.to_string(), Some(window.to_string())));
+        let Ok(pane_pid) = pane_pid.parse::<u32>() else {
+            continue;
+        };
+        let leads_to_target = pane_pid == pid
+            || pgrep_child(pane_pid).is_some_and(|children| children.iter().any(|c| *c == pid));
+        if !leads_to_target {
+            continue;
         }
+        // Return the exact pane address. window_index (not the window NAME)
+        // anchors the target even if the user renames the window between the
+        // scan and the kill; pane_index pins the pane.
+        let _ = window;
+        return Ok(Some((
+            session.to_string(),
+            window_index.to_string(),
+            pane_index.to_string(),
+        )));
     }
-    // A dedicated-session instance may have moved cwd — fall back to the
-    // session-name scan (old behavior).
-    let output = Command::new(tmux)
-        .args(["list-sessions", "-F", "#{session_name}\t#{session_path}"])
+    Ok(None)
+}
+
+/// Direct children of a pid (best effort; empty on any failure).
+fn pgrep_child(pid: u32) -> Option<Vec<u32>> {
+    let output = Command::new("pgrep")
+        .arg("-P")
+        .arg(pid.to_string())
         .output()
-        .map_err(|error| format!("cannot run {tmux}: {error}"))?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        let mut parts = line.splitn(2, '\t');
-        let (Some(name), Some(path)) = (parts.next(), parts.next()) else {
-            continue;
-        };
-        if name.starts_with(&format!("{prefix}-")) && Path::new(path) == Path::new(&target.cwd) {
-            return Ok((name.to_string(), None));
-        }
-    }
-    Err(format!(
-        "找不到 {} 对应的 tmux 会话（cwd={}）",
-        target.label(),
-        target.cwd
-    ))
+        .ok()?;
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect(),
+    )
 }
 
 /// The window-name candidate for a target (basename of its cwd).
-fn names_from(target: &InstanceView) -> String {
-    std::path::Path::new(&target.cwd)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default()
-}
 
 fn rows(ctx: &SpawnContext<'_>) -> Result<Vec<String>, String> {
     let now = now_ms();
