@@ -52,7 +52,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS instances_name_host ON instances(name, host);
 CREATE TABLE IF NOT EXISTS leases (
     capability  TEXT PRIMARY KEY,
     owner_node  TEXT NOT NULL,
-    owner_epoch TEXT NOT NULL,
     owner_name  TEXT NOT NULL,
     generation  INTEGER NOT NULL,
     expires_at  INTEGER NOT NULL,
@@ -307,6 +306,21 @@ impl Store {
             conn.execute_batch(
                 "ALTER TABLE leases ADD COLUMN state_json TEXT NOT NULL DEFAULT '{}'",
             )?;
+        }
+        // owner_epoch was a double-dylib artifact: each plugin load minted its
+        // own epoch and the lease row fenced on it. The single-plugin mesh has
+        // one identity per process and in-process thread lifecycle, so
+        // (owner_node, generation) is the complete fence. Drop the column.
+        let has_owner_epoch: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('leases') WHERE name = 'owner_epoch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if has_owner_epoch != 0 {
+            // SQLite 3.35+ supports DROP COLUMN; bundled rusqlite ships newer.
+            conn.execute_batch("ALTER TABLE leases DROP COLUMN owner_epoch")?;
         }
         let found: Option<String> = conn
             .query_row(
@@ -584,11 +598,10 @@ impl Store {
         capability: &str,
         node_id: &str,
         node_name: &str,
-        epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<Claim> {
-        retry_busy(|| self.claim_lease_once(capability, node_id, node_name, epoch, now, ttl_ms))
+        retry_busy(|| self.claim_lease_once(capability, node_id, node_name, now, ttl_ms))
     }
 
     fn claim_lease_once(
@@ -596,15 +609,14 @@ impl Store {
         capability: &str,
         node_id: &str,
         node_name: &str,
-        epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<Claim> {
         let mut conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<(String, String, String, i64, i64, i64)> = tx
+        let existing: Option<(String, String, i64, i64, i64)> = tx
             .query_row(
-                "SELECT owner_node, owner_epoch, owner_name, generation, expires_at, updated_at
+                "SELECT owner_node, owner_name, generation, expires_at, updated_at
                  FROM leases WHERE capability = ?1",
                 params![capability],
                 |row| {
@@ -614,7 +626,6 @@ impl Store {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
-                        row.get(5)?,
                     ))
                 },
             )
@@ -625,16 +636,16 @@ impl Store {
                 let generation = 1;
                 let expires_at = now + ttl_ms;
                 tx.execute(
-                    "INSERT INTO leases(capability, owner_node, owner_epoch, owner_name, generation, expires_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![capability, node_id, epoch, node_name, generation, expires_at, now],
+                    "INSERT INTO leases(capability, owner_node, owner_name, generation, expires_at, updated_at, state_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}')",
+                    params![capability, node_id, node_name, generation, expires_at, now],
                 )?;
                 Claim::Granted {
                     generation,
                     expires_at,
                 }
             }
-            Some((owner_node, owner_epoch, owner_name, generation, expires_at, updated_at)) => {
+            Some((owner_node, owner_name, generation, expires_at, updated_at)) => {
                 let holder_host = tx
                     .query_row(
                         "SELECT host FROM instances WHERE node_id = ?1",
@@ -644,14 +655,13 @@ impl Store {
                     .unwrap_or_default();
                 let same_owner = owner_node == node_id;
                 if same_owner {
-                    // Reload resumption keeps the generation; a plain renewal
-                    // just extends the deadline.
-                    let _ = owner_epoch;
+                    // Same node re-claiming (process restart / owner loop
+                    // resume): keep the generation, just extend the deadline.
                     let expires_at = now + ttl_ms;
                     tx.execute(
-                        "UPDATE leases SET owner_epoch = ?2, owner_name = ?3, expires_at = ?4, updated_at = ?5
+                        "UPDATE leases SET owner_name = ?2, expires_at = ?3, updated_at = ?4
                          WHERE capability = ?1",
-                        params![capability, epoch, node_name, expires_at, now],
+                        params![capability, node_name, expires_at, now],
                     )?;
                     Claim::Granted {
                         generation,
@@ -661,10 +671,10 @@ impl Store {
                     let generation = generation + 1;
                     let expires_at = now + ttl_ms;
                     tx.execute(
-                        "UPDATE leases SET owner_node = ?2, owner_epoch = ?3, owner_name = ?4,
-                                generation = ?5, expires_at = ?6, updated_at = ?7
+                        "UPDATE leases SET owner_node = ?2, owner_name = ?3,
+                                generation = ?4, expires_at = ?5, updated_at = ?6
                          WHERE capability = ?1",
-                        params![capability, node_id, epoch, node_name, generation, expires_at, now],
+                        params![capability, node_id, node_name, generation, expires_at, now],
                     )?;
                     Claim::Granted {
                         generation,
@@ -695,16 +705,15 @@ impl Store {
         &self,
         capability: &str,
         node_id: &str,
-        epoch: &str,
         generation: i64,
         now: i64,
         ttl_ms: i64,
     ) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let changed = conn.execute(
-            "UPDATE leases SET expires_at = ?5, updated_at = ?6
-             WHERE capability = ?1 AND owner_node = ?2 AND owner_epoch = ?3 AND generation = ?4",
-            params![capability, node_id, epoch, generation, now + ttl_ms, now],
+            "UPDATE leases SET expires_at = ?4, updated_at = ?5
+             WHERE capability = ?1 AND owner_node = ?2 AND generation = ?3",
+            params![capability, node_id, generation, now + ttl_ms, now],
         )?;
         Ok(changed == 1)
     }
@@ -715,16 +724,15 @@ impl Store {
         &self,
         capability: &str,
         node_id: &str,
-        epoch: &str,
         generation: i64,
         now: i64,
     ) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM leases
-             WHERE capability = ?1 AND owner_node = ?2 AND owner_epoch = ?3
-               AND generation = ?4 AND expires_at > ?5",
-            params![capability, node_id, epoch, generation, now],
+             WHERE capability = ?1 AND owner_node = ?2 AND generation = ?3
+               AND expires_at > ?4",
+            params![capability, node_id, generation, now],
             |row| row.get(0),
         )?;
         Ok(count == 1)
@@ -737,29 +745,28 @@ impl Store {
     pub fn transfer_lease(
         &self,
         capability: &str,
-        from: Option<(&str, &str, i64)>,
+        from: Option<(&str, i64)>,
         to_node: &str,
         to_name: &str,
-        _owner_epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<i64> {
         let mut conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<(String, String, String, i64)> = tx
+        let existing: Option<(String, String, i64)> = tx
             .query_row(
-                "SELECT owner_node, owner_epoch, owner_name, generation FROM leases WHERE capability = ?1",
+                "SELECT owner_node, owner_name, generation FROM leases WHERE capability = ?1",
                 params![capability],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        let Some((owner_node, owner_epoch, owner_name, generation)) = existing else {
+        let Some((owner_node, owner_name, generation)) = existing else {
             return Err(HubError::invalid(format!(
                 "no lease for capability {capability:?}; claim it first"
             )));
         };
-        if let Some((from_node, from_epoch, from_gen)) = from {
-            if from_node != owner_node || from_epoch != owner_epoch || from_gen != generation {
+        if let Some((from_node, from_gen)) = from {
+            if from_node != owner_node || from_gen != generation {
                 return Err(HubError::invalid(format!(
                     "lease {capability:?} is held by {owner_name} (generation {generation})"
                 )));
@@ -767,13 +774,12 @@ impl Store {
         }
         let generation = generation + 1;
         tx.execute(
-            "UPDATE leases SET owner_node = ?2, owner_epoch = ?3, owner_name = ?4,
-                    generation = ?5, expires_at = ?6, updated_at = ?7
+            "UPDATE leases SET owner_node = ?2, owner_name = ?3,
+                    generation = ?4, expires_at = ?5, updated_at = ?6
              WHERE capability = ?1",
             params![
                 capability,
                 to_node,
-                owner_epoch,
                 to_name,
                 generation,
                 now + ttl_ms,
@@ -788,20 +794,15 @@ impl Store {
     /// hold it (`/use <target>`, or a channel hand-off decided out of band).
     ///
     /// The generation is bumped so the previous owner is fenced out immediately.
-    /// `owner_epoch` is cleared: the target's next `claim_lease` sees its own
-    /// node with a different epoch and resumes it *without* another bump.
     pub fn assign_lease(
         &self,
         capability: &str,
         to_node: &str,
         to_name: &str,
-        owner_epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<i64> {
-        retry_busy(|| {
-            self.assign_lease_once(capability, to_node, to_name, owner_epoch, now, ttl_ms)
-        })
+        retry_busy(|| self.assign_lease_once(capability, to_node, to_name, now, ttl_ms))
     }
 
     fn assign_lease_once(
@@ -809,7 +810,6 @@ impl Store {
         capability: &str,
         to_node: &str,
         to_name: &str,
-        owner_epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<i64> {
@@ -824,16 +824,16 @@ impl Store {
             .optional()?;
         let generation = existing.map(|generation| generation + 1).unwrap_or(1);
         tx.execute(
-            r#"INSERT INTO leases(capability, owner_node, owner_epoch, owner_name, generation, expires_at, updated_at)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            r#"INSERT INTO leases(capability, owner_node, owner_name, generation, expires_at, updated_at, state_json)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}')
                ON CONFLICT(capability) DO UPDATE SET
                  owner_node = excluded.owner_node,
-                 owner_epoch = excluded.owner_epoch,
                  owner_name = excluded.owner_name,
                  generation = excluded.generation,
                  expires_at = excluded.expires_at,
-                 updated_at = excluded.updated_at"#,
-            params![capability, to_node, owner_epoch, to_name, generation, now + ttl_ms, now],
+                 updated_at = excluded.updated_at,
+                 state_json = excluded.state_json"#,
+            params![capability, to_node, to_name, generation, now + ttl_ms, now],
         )?;
         tx.commit()?;
         Ok(generation)
@@ -869,48 +869,18 @@ impl Store {
         }
     }
 
-    /// Legacy kv cursor (v1): read once for migration, then ignored.
-    pub fn legacy_cursor(&self) -> Option<String> {
-        self.get_cursor()
-    }
-
-    /// Shared getupdates cursor (cross-instance: whoever polls advances it,
-    /// so a hand-off mid-poll never replays or splits messages).
-    pub fn get_cursor(&self) -> Option<String> {
-        let conn = self.conn.lock().expect("store mutex poisoned");
-        conn.query_row(
-            "SELECT value FROM kv WHERE key='wechat_cursor'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
-    }
-
-    pub fn set_cursor(&self, cursor: &str) {
-        if let Ok(conn) = self.conn.lock() {
-            let _ = conn.execute(
-                "INSERT INTO kv(key, value) VALUES ('wechat_cursor', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = ?1",
-                params![cursor],
-            );
-        }
-    }
-
     /// Drop a lease this process owns (`/wechat stop`).
     pub fn release_lease(
         &self,
         capability: &str,
         node_id: &str,
-        epoch: &str,
         generation: i64,
     ) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let changed = conn.execute(
             "DELETE FROM leases
-             WHERE capability = ?1 AND owner_node = ?2 AND owner_epoch = ?3 AND generation = ?4",
-            params![capability, node_id, epoch, generation],
+             WHERE capability = ?1 AND owner_node = ?2 AND generation = ?3",
+            params![capability, node_id, generation],
         )?;
         Ok(changed == 1)
     }

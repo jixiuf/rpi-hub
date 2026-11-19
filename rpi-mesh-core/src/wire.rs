@@ -184,7 +184,6 @@ pub fn dispatch(store: &Store, method_name: &str, params: Value) -> std::result:
                         &args.capability,
                         &args.node_id,
                         &args.node_name,
-                        &args.epoch,
                         args.now,
                         args.ttl_ms,
                     )
@@ -198,7 +197,6 @@ pub fn dispatch(store: &Store, method_name: &str, params: Value) -> std::result:
                     .renew_lease(
                         &args.capability,
                         &args.node_id,
-                        &args.epoch,
                         args.generation,
                         args.now,
                         args.ttl_ms,
@@ -213,7 +211,6 @@ pub fn dispatch(store: &Store, method_name: &str, params: Value) -> std::result:
                     .check_lease(
                         &args.capability,
                         &args.node_id,
-                        &args.epoch,
                         args.generation,
                         args.now,
                     )
@@ -228,7 +225,6 @@ pub fn dispatch(store: &Store, method_name: &str, params: Value) -> std::result:
                         &args.capability,
                         &args.to_node,
                         &args.to_name,
-                        &args.owner_epoch,
                         args.now,
                         args.ttl_ms,
                     )
@@ -239,7 +235,7 @@ pub fn dispatch(store: &Store, method_name: &str, params: Value) -> std::result:
             let args = args!(api::ReleaseParams);
             serde_json::to_value(
                 store
-                    .release_lease(&args.capability, &args.node_id, &args.epoch, args.generation)
+                    .release_lease(&args.capability, &args.node_id, args.generation)
                     .map_err(|e| e.to_string())?,
             )
         }
@@ -1085,7 +1081,6 @@ impl HubStore for RemoteStore {
         capability: &str,
         node_id: &str,
         node_name: &str,
-        epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<Claim> {
@@ -1096,7 +1091,6 @@ impl HubStore for RemoteStore {
                 capability: capability.to_string(),
                 node_id: node_id.to_string(),
                 node_name: node_name.to_string(),
-                epoch: epoch.to_string(),
                 now,
                 ttl_ms,
             }
@@ -1108,7 +1102,6 @@ impl HubStore for RemoteStore {
         &self,
         capability: &str,
         node_id: &str,
-        epoch: &str,
         generation: i64,
         now: i64,
         ttl_ms: i64,
@@ -1119,7 +1112,6 @@ impl HubStore for RemoteStore {
             api::RenewParams {
                 capability: capability.to_string(),
                 node_id: node_id.to_string(),
-                epoch: epoch.to_string(),
                 generation,
                 now,
                 ttl_ms,
@@ -1132,7 +1124,6 @@ impl HubStore for RemoteStore {
         &self,
         capability: &str,
         node_id: &str,
-        epoch: &str,
         generation: i64,
         now: i64,
     ) -> Result<bool> {
@@ -1142,7 +1133,6 @@ impl HubStore for RemoteStore {
             api::CheckParams {
                 capability: capability.to_string(),
                 node_id: node_id.to_string(),
-                epoch: epoch.to_string(),
                 generation,
                 now,
             }
@@ -1155,7 +1145,6 @@ impl HubStore for RemoteStore {
         capability: &str,
         to_node: &str,
         to_name: &str,
-        owner_epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<i64> {
@@ -1166,7 +1155,6 @@ impl HubStore for RemoteStore {
                 capability: capability.to_string(),
                 to_node: to_node.to_string(),
                 to_name: to_name.to_string(),
-                owner_epoch: owner_epoch.to_string(),
                 now,
                 ttl_ms,
             }
@@ -1178,7 +1166,6 @@ impl HubStore for RemoteStore {
         &self,
         capability: &str,
         node_id: &str,
-        epoch: &str,
         generation: i64,
     ) -> Result<bool> {
         let value = call!(
@@ -1187,7 +1174,6 @@ impl HubStore for RemoteStore {
             api::ReleaseParams {
                 capability: capability.to_string(),
                 node_id: node_id.to_string(),
-                epoch: epoch.to_string(),
                 generation,
             }
         )?;

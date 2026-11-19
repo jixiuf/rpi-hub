@@ -432,8 +432,6 @@ impl Hub {
     }
 
     /// Move the wechat lease to `target` — shared by `/use` and the selector.
-    /// `owner_epoch` is empty here: the target instance claims the lease with
-    /// its own epoch on its next lease tick (same owner_node → resume branch).
     pub fn switch_lease_to(&self, target: &InstanceView) -> Result<String, String> {
         // Self hand-off: only a no-op when THIS instance really holds the
         // channel. Otherwise it means "take the channel back for me" — a

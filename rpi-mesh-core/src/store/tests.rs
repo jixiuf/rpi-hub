@@ -129,7 +129,7 @@ fn lease_is_exclusive_until_it_expires() {
     let (_dir, store) = file_store();
     let now = 1_000_000;
     let first = store
-        .claim_lease("wechat", "n1", "home", "e1", now, TTL)
+        .claim_lease("wechat", "n1", "home", now, TTL)
         .unwrap();
     assert_eq!(
         first,
@@ -140,7 +140,7 @@ fn lease_is_exclusive_until_it_expires() {
     );
 
     let second = store
-        .claim_lease("wechat", "n2", "models", "e1", now, TTL)
+        .claim_lease("wechat", "n2", "models", now, TTL)
         .unwrap();
     match second {
         Claim::Held { holder } => {
@@ -152,7 +152,7 @@ fn lease_is_exclusive_until_it_expires() {
 
     // After expiry a different instance takes over, bumping the generation.
     let takeover = store
-        .claim_lease("wechat", "n2", "models", "e1", now + TTL + 1, TTL)
+        .claim_lease("wechat", "n2", "models", now + TTL + 1, TTL)
         .unwrap();
     assert_eq!(
         takeover,
@@ -163,26 +163,26 @@ fn lease_is_exclusive_until_it_expires() {
     );
     // The fenced-out owner can neither renew nor pass the send gate.
     assert!(!store
-        .renew_lease("wechat", "n1", "e1", 1, now + TTL + 2, TTL)
+        .renew_lease("wechat", "n1", 1, now + TTL + 2, TTL)
         .unwrap());
     assert!(!store
-        .check_lease("wechat", "n1", "e1", 1, now + TTL + 2)
+        .check_lease("wechat", "n1", 1, now + TTL + 2)
         .unwrap());
     assert!(store
-        .check_lease("wechat", "n2", "e1", 2, now + TTL + 2)
+        .check_lease("wechat", "n2", 2, now + TTL + 2)
         .unwrap());
 }
 
 #[test]
-fn reload_resumes_the_same_lease_without_bumping_the_generation() {
+fn same_node_reclaim_resumes_the_lease_without_bumping_the_generation() {
     let (_dir, store) = file_store();
     let now = 1_000_000;
     store
-        .claim_lease("wechat", "n1", "home", "load-1", now, TTL)
+        .claim_lease("wechat", "n1", "home", now, TTL)
         .unwrap();
     // Same node (same process), new plugin load.
     let resumed = store
-        .claim_lease("wechat", "n1", "home", "load-2", now + 1_000, TTL)
+        .claim_lease("wechat", "n1", "home", now + 1_000, TTL)
         .unwrap();
     assert_eq!(
         resumed,
@@ -191,12 +191,9 @@ fn reload_resumes_the_same_lease_without_bumping_the_generation() {
             expires_at: now + 1_000 + TTL
         }
     );
-    // The old load's gate now fails even though the generation is unchanged.
-    assert!(!store
-        .check_lease("wechat", "n1", "load-1", 1, now + 1_001)
-        .unwrap());
+    // The generation-1 gate still passes: fencing is (node, generation).
     assert!(store
-        .check_lease("wechat", "n1", "load-2", 1, now + 1_001)
+        .check_lease("wechat", "n1", 1, now + 1_001)
         .unwrap());
 }
 
@@ -205,38 +202,22 @@ fn transfer_bumps_the_generation_and_fences_the_previous_owner() {
     let (_dir, store) = file_store();
     let now = 1_000_000;
     store
-        .claim_lease("wechat", "n1", "home", "e1", now, TTL)
+        .claim_lease("wechat", "n1", "home", now, TTL)
         .unwrap();
     let generation = store
-        .transfer_lease(
-            "wechat",
-            Some(("n1", "e1", 1)),
-            "n2",
-            "models",
-            "e2",
-            now + 1,
-            TTL,
-        )
+        .transfer_lease("wechat", Some(("n1", 1)), "n2", "models", now + 1, TTL)
         .unwrap();
     assert_eq!(generation, 2);
     let holder = store.lease_holder("wechat").unwrap().unwrap();
     assert_eq!(holder.owner_node, "n2");
     assert!(!store
-        .renew_lease("wechat", "n1", "e1", 1, now + 2, TTL)
+        .renew_lease("wechat", "n1", 1, now + 2, TTL)
         .unwrap());
-    assert!(!store.check_lease("wechat", "n1", "e1", 1, now + 2).unwrap());
+    assert!(!store.check_lease("wechat", "n1", 1, now + 2).unwrap());
 
     // A stale `from` guard is rejected rather than silently re-transferring.
     let error = store
-        .transfer_lease(
-            "wechat",
-            Some(("n1", "e1", 1)),
-            "n3",
-            "other",
-            "new-epoch",
-            now + 3,
-            TTL,
-        )
+        .transfer_lease("wechat", Some(("n1", 1)), "n3", "other", now + 3, TTL)
         .unwrap_err();
     assert!(error.to_string().contains("held by"));
 }
@@ -245,7 +226,7 @@ fn transfer_bumps_the_generation_and_fences_the_previous_owner() {
 fn transfer_requires_a_lease() {
     let (_dir, store) = file_store();
     let error = store
-        .transfer_lease("wechat", None, "n2", "models", "new-epoch", 1, TTL)
+        .transfer_lease("wechat", None, "n2", "models", 1, TTL)
         .unwrap_err();
     assert!(error.to_string().contains("claim it first"));
 }
@@ -268,7 +249,6 @@ fn repeated_start_bursts_never_leak_two_owners() {
                         "wechat",
                         &format!("node-{index}"),
                         &format!("inst-{index}"),
-                        &format!("e{round}"),
                         now,
                         TTL,
                     )
@@ -289,17 +269,17 @@ fn assign_hands_a_lease_to_a_target_and_fences_the_old_owner() {
     let (_dir, store) = file_store();
     let now = 1_000_000;
     store
-        .claim_lease("wechat", "n1", "home", "e1", now, TTL)
+        .claim_lease("wechat", "n1", "home", now, TTL)
         .unwrap();
     let generation = store
-        .assign_lease("wechat", "n2", "models", "e-assign", now + 1, TTL)
+        .assign_lease("wechat", "n2", "models", now + 1, TTL)
         .unwrap();
     assert_eq!(generation, 2);
-    assert!(!store.check_lease("wechat", "n1", "e1", 1, now + 2).unwrap());
+    assert!(!store.check_lease("wechat", "n1", 1, now + 2).unwrap());
 
-    // The target claims with its own epoch: same owner, so the generation holds.
+    // The target claims (same node): the generation holds.
     let claim = store
-        .claim_lease("wechat", "n2", "models", "e2", now + 3, TTL)
+        .claim_lease("wechat", "n2", "models", now + 3, TTL)
         .unwrap();
     assert_eq!(
         claim,
@@ -308,7 +288,7 @@ fn assign_hands_a_lease_to_a_target_and_fences_the_old_owner() {
             expires_at: now + 3 + TTL
         }
     );
-    assert!(store.check_lease("wechat", "n2", "e2", 2, now + 4).unwrap());
+    assert!(store.check_lease("wechat", "n2", 2, now + 4).unwrap());
 }
 
 #[test]
@@ -316,10 +296,10 @@ fn release_only_accepts_the_owner() {
     let (_dir, store) = file_store();
     let now = 1_000_000;
     store
-        .claim_lease("wechat", "n1", "home", "e1", now, TTL)
+        .claim_lease("wechat", "n1", "home", now, TTL)
         .unwrap();
-    assert!(!store.release_lease("wechat", "n2", "e1", 1).unwrap());
-    assert!(store.release_lease("wechat", "n1", "e1", 1).unwrap());
+    assert!(!store.release_lease("wechat", "n2", 1).unwrap());
+    assert!(store.release_lease("wechat", "n1", 1).unwrap());
     assert!(store.lease_holder("wechat").unwrap().is_none());
 }
 
@@ -338,7 +318,6 @@ fn independent_connections_race_for_one_lease() {
                     "wechat",
                     &format!("node-{index}"),
                     &format!("inst-{index}"),
-                    "e1",
                     now,
                     TTL,
                 )
@@ -362,7 +341,7 @@ fn lease_holder_reports_renewal_liveness() {
     let (_dir, store) = file_store();
     let now = 1_000_000;
     let claim = store
-        .claim_lease("wechat", "n1", "home", "e1", now, TTL)
+        .claim_lease("wechat", "n1", "home", now, TTL)
         .unwrap();
     let Claim::Granted { generation, .. } = claim else {
         panic!("expected grant")
@@ -374,7 +353,7 @@ fn lease_holder_reports_renewal_liveness() {
     // A renewal advances updated_at without moving the owner: watchers use
     // this to tell "expired but actively renewing" from "expired and gone".
     assert!(store
-        .renew_lease("wechat", "n1", "e1", generation, now + 5_000, TTL)
+        .renew_lease("wechat", "n1", generation, now + 5_000, TTL)
         .unwrap());
     let holder = store.lease_holder("wechat").unwrap().unwrap();
     assert_eq!(holder.updated_at, now + 5_000);
@@ -387,7 +366,7 @@ fn assign_notifies_target_and_previous_owner() {
     let store = std::sync::Arc::new(store);
     let now = 1_000_000;
     store
-        .claim_lease("wechat", "n1", "home", "e1", now, TTL)
+        .claim_lease("wechat", "n1", "home", now, TTL)
         .unwrap();
     store
         .register_instance(&record("n1", "home", "h1", 10, "e1", now), ALIVE)
@@ -496,7 +475,7 @@ fn prune_drops_dead_presence_and_orphan_leases() {
         .register_instance(&record("n1", "home", "alpha", 10, "e1", now), ALIVE)
         .unwrap();
     store
-        .claim_lease("wechat", "n1", "home", "e1", now, TTL)
+        .claim_lease("wechat", "n1", "home", now, TTL)
         .unwrap();
 
     let report = store.prune(now + ALIVE + 1, ALIVE).unwrap();

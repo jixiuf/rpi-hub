@@ -30,13 +30,6 @@ pub struct Backends {
 impl Backends {
     pub fn start(dir: &Path, config: &HubConfig) -> Result<Self, String> {
         let relay = &config.remote.relay;
-        if relay.is_ssh_legacy() {
-            return Err(
-                "remote.relay.sshHost/remoteSocket/localSocket are no longer used; \
-                 configure listen/connect + tokenFile instead"
-                    .to_string(),
-            );
-        }
         match config.remote.mode {
             RemoteMode::Local => {
                 let store = Arc::new(Store::open(dir).map_err(|e| e.to_string())?);

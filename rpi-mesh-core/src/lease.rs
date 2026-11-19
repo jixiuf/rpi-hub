@@ -32,14 +32,13 @@ use crate::store::{Claim, InstanceView, LeaseHolder};
 /// so the compiler-verified path to mutation is the facade.
 pub struct LeaseOwner {
     store: Arc<dyn HubStore>,
-    /// Owning node identity (the wechat plugin's plain node_id).
+    /// Owning node identity (the mesh node_id — one per process).
     node_id: String,
     /// Display name used when the owner (re)writes lease rows. Interior
     /// mutable: the store may rename the instance at registration time
     /// (name collisions get a `-<pid>` suffix) and the plugin learns its
     /// final name only afterwards — see [`LeaseOwner::set_node_name`].
     node_name: Mutex<String>,
-    epoch: String,
     ttl_ms: i64,
 }
 
@@ -49,7 +48,6 @@ impl Clone for LeaseOwner {
             store: Arc::clone(&self.store),
             node_id: self.node_id.clone(),
             node_name: Mutex::new(self.node_name()),
-            epoch: self.epoch.clone(),
             ttl_ms: self.ttl_ms,
         }
     }
@@ -58,18 +56,11 @@ impl Clone for LeaseOwner {
 impl LeaseOwner {
     /// Build an owner token. The wechat plugin constructs exactly one per
     /// process (on its Hub); the hub plugin constructs none.
-    pub fn new(
-        store: Arc<dyn HubStore>,
-        node_id: String,
-        node_name: String,
-        epoch: String,
-        ttl_ms: i64,
-    ) -> Self {
+    pub fn new(store: Arc<dyn HubStore>, node_id: String, node_name: String, ttl_ms: i64) -> Self {
         Self {
             store,
             node_id,
             node_name: Mutex::new(node_name),
-            epoch,
             ttl_ms,
         }
     }
@@ -95,14 +86,7 @@ impl LeaseOwner {
         let node_name = self.node_name();
         let claim = self
             .store
-            .claim_lease(
-                capability,
-                &self.node_id,
-                &node_name,
-                &self.epoch,
-                now,
-                self.ttl_ms,
-            )
+            .claim_lease(capability, &self.node_id, &node_name, now, self.ttl_ms)
             .map_err(|e| e.to_string())?;
         if let Claim::Held { holder } = &claim {
             // Alive means "same-host pid still exists or row is on another
@@ -116,14 +100,7 @@ impl LeaseOwner {
             if !owner_alive {
                 let generation = self
                     .store
-                    .assign_lease(
-                        capability,
-                        &self.node_id,
-                        &node_name,
-                        &self.epoch,
-                        now,
-                        self.ttl_ms,
-                    )
+                    .assign_lease(capability, &self.node_id, &node_name, now, self.ttl_ms)
                     .map_err(|e| e.to_string())?;
                 return Ok(Claim::Granted {
                     generation,
@@ -134,32 +111,25 @@ impl LeaseOwner {
         Ok(claim)
     }
 
-    /// Renew the lease for the owning node (fenced by node + epoch +
-    /// generation inside the store).
+    /// Renew the lease for the owning node (fenced by node + generation
+    /// inside the store).
     pub fn renew(&self, capability: &str, generation: i64, now: i64) -> Result<bool, String> {
         self.store
-            .renew_lease(
-                capability,
-                &self.node_id,
-                &self.epoch,
-                generation,
-                now,
-                self.ttl_ms,
-            )
+            .renew_lease(capability, &self.node_id, generation, now, self.ttl_ms)
             .map_err(|e| e.to_string())
     }
 
     /// Check the lease without extending it (outbound gating).
     pub fn check(&self, capability: &str, generation: i64, now: i64) -> bool {
         self.store
-            .check_lease(capability, &self.node_id, &self.epoch, generation, now)
+            .check_lease(capability, &self.node_id, generation, now)
             .unwrap_or(false)
     }
 
     /// Release the lease (user stop).
     pub fn release(&self, capability: &str, generation: i64) -> Result<bool, String> {
         self.store
-            .release_lease(capability, &self.node_id, &self.epoch, generation)
+            .release_lease(capability, &self.node_id, generation)
             .map_err(|e| e.to_string())
     }
 
@@ -201,9 +171,8 @@ impl LeaseAdmin {
         Self { store, ttl_ms }
     }
 
-    /// Assign `capability` to `target`. `owner_epoch` is empty: the target's
-    /// own owner token claims with its epoch on the next claim/renew (same
-    /// node_id → resume branch).
+    /// Assign `capability` to `target`; the target's next `claim_lease` (same
+    /// node) resumes it without another generation bump.
     ///
     /// The lease move and the notification are intentionally NOT atomic:
     /// after the store row lands, both sides learn about the hand-off via
@@ -224,14 +193,7 @@ impl LeaseAdmin {
             .filter(|holder| !holder.owner_node.is_empty() && holder.owner_node != target.node_id);
         let generation = self
             .store
-            .assign_lease(
-                capability,
-                &target.node_id,
-                &target.name,
-                "",
-                now,
-                self.ttl_ms,
-            )
+            .assign_lease(capability, &target.node_id, &target.name, now, self.ttl_ms)
             .map_err(|e| e.to_string())?;
         self.notify(capability, target, previous.as_ref(), generation, now);
         Ok(generation)

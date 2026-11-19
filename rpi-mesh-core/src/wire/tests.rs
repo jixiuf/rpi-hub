@@ -113,7 +113,7 @@ fn relay_round_trips_presence_leases_and_mailbox() {
     assert!(listed[0].busy);
 
     let claim = client
-        .claim_lease("wechat", "n1", "home", "e1", now, TTL)
+        .claim_lease("wechat", "n1", "home", now, TTL)
         .unwrap();
     assert_eq!(
         claim,
@@ -123,7 +123,7 @@ fn relay_round_trips_presence_leases_and_mailbox() {
         }
     );
     assert!(client
-        .check_lease("wechat", "n1", "e1", 1, now + 1)
+        .check_lease("wechat", "n1", 1, now + 1)
         .unwrap());
     assert!(client.lease_holder("wechat").unwrap().is_some());
 
@@ -151,30 +151,30 @@ fn a_second_node_is_fenced_by_the_relay_lease() {
     b.register_instance(&record("n2", "models", now), ALIVE).unwrap();
 
     assert!(matches!(
-        a.claim_lease("wechat", "n1", "home", "e1", now, TTL).unwrap(),
+        a.claim_lease("wechat", "n1", "home", now, TTL).unwrap(),
         Claim::Granted { .. }
     ));
     assert!(matches!(
-        b.claim_lease("wechat", "n2", "models", "e1", now, TTL).unwrap(),
+        b.claim_lease("wechat", "n2", "models", now, TTL).unwrap(),
         Claim::Held { .. }
     ));
     // Transfer through the same relay; the old owner's gate must fail.
     let generation = b
-        .assign_lease("wechat", "n2", "models", "e-x", now + 1, TTL)
+        .assign_lease("wechat", "n2", "models", now + 1, TTL)
         .unwrap();
     assert_eq!(generation, 2);
-    assert!(!a.check_lease("wechat", "n1", "e1", 1, now + 2).unwrap());
+    assert!(!a.check_lease("wechat", "n1", 1, now + 2).unwrap());
     // The new owner must claim to bind its epoch (its worker does this on the
     // next lease tick); the generation stays put because the node matches.
     assert_eq!(
-        b.claim_lease("wechat", "n2", "models", "e1", now + 2, TTL)
+        b.claim_lease("wechat", "n2", "models", now + 2, TTL)
             .unwrap(),
         Claim::Granted {
             generation: 2,
             expires_at: now + 2 + TTL
         }
     );
-    assert!(b.check_lease("wechat", "n2", "e1", 2, now + 3).unwrap());
+    assert!(b.check_lease("wechat", "n2", 2, now + 3).unwrap());
 }
 
 #[test]

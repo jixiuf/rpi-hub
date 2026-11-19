@@ -137,18 +137,9 @@ pub struct RelayConfig {
     /// (leaner, for a dedicated port).
     #[serde(default)]
     pub http: bool,
-    /// Legacy ssh-tunnel fields, kept only to fail fast with a clear message:
-    /// the transport no longer dials through ssh.
-    pub ssh_host: Option<String>,
-    pub remote_socket: Option<String>,
-    pub local_socket: Option<String>,
 }
 
 impl RelayConfig {
-    pub fn is_ssh_legacy(&self) -> bool {
-        self.ssh_host.is_some() || self.remote_socket.is_some() || self.local_socket.is_some()
-    }
-
     pub const DEFAULT_TCP_PORT: u16 = 9527;
 }
 

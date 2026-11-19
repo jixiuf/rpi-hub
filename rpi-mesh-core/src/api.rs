@@ -52,7 +52,6 @@ pub trait HubStore: Send + Sync + std::fmt::Debug {
         capability: &str,
         node_id: &str,
         node_name: &str,
-        epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<Claim>;
@@ -60,7 +59,6 @@ pub trait HubStore: Send + Sync + std::fmt::Debug {
         &self,
         capability: &str,
         node_id: &str,
-        epoch: &str,
         generation: i64,
         now: i64,
         ttl_ms: i64,
@@ -69,7 +67,6 @@ pub trait HubStore: Send + Sync + std::fmt::Debug {
         &self,
         capability: &str,
         node_id: &str,
-        epoch: &str,
         generation: i64,
         now: i64,
     ) -> Result<bool>;
@@ -78,7 +75,6 @@ pub trait HubStore: Send + Sync + std::fmt::Debug {
         capability: &str,
         to_node: &str,
         to_name: &str,
-        owner_epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<i64>;
@@ -86,7 +82,6 @@ pub trait HubStore: Send + Sync + std::fmt::Debug {
         &self,
         capability: &str,
         node_id: &str,
-        epoch: &str,
         generation: i64,
     ) -> Result<bool>;
     fn lease_holder(&self, capability: &str) -> Result<Option<LeaseHolder>>;
@@ -124,10 +119,6 @@ pub trait HubStore: Send + Sync + std::fmt::Debug {
     }
     fn set_channel_state(&self, _capability: &str, _state: &serde_json::Value) {}
     /// Legacy kv cursor (v1 schema) — read-only migration source.
-    fn legacy_cursor(&self) -> Option<String> {
-        None
-    }
-
     /// Drop presence rows of same-host pids that are demonstrably dead
     /// (`kill(pid, 0)` fails). Only the local Store reaps; remote clients
     /// keep the no-op default (a foreign machine's pids are meaningless
@@ -184,10 +175,6 @@ impl HubStore for Store {
     }
     fn set_channel_state(&self, _capability: &str, _state: &serde_json::Value) {}
     /// Legacy kv cursor (v1 schema) — read-only migration source.
-    fn legacy_cursor(&self) -> Option<String> {
-        None
-    }
-
     /// Drop presence rows of same-host pids that are demonstrably dead
     /// (`kill(pid, 0)` fails). Only the local Store reaps; the default (and
     /// the relay client's) is a no-op because a foreign machine's pids are
@@ -203,52 +190,47 @@ impl HubStore for Store {
         capability: &str,
         node_id: &str,
         node_name: &str,
-        epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<Claim> {
-        Store::claim_lease(self, capability, node_id, node_name, epoch, now, ttl_ms)
+        Store::claim_lease(self, capability, node_id, node_name, now, ttl_ms)
     }
     fn renew_lease(
         &self,
         capability: &str,
         node_id: &str,
-        epoch: &str,
         generation: i64,
         now: i64,
         ttl_ms: i64,
     ) -> Result<bool> {
-        Store::renew_lease(self, capability, node_id, epoch, generation, now, ttl_ms)
+        Store::renew_lease(self, capability, node_id, generation, now, ttl_ms)
     }
     fn check_lease(
         &self,
         capability: &str,
         node_id: &str,
-        epoch: &str,
         generation: i64,
         now: i64,
     ) -> Result<bool> {
-        Store::check_lease(self, capability, node_id, epoch, generation, now)
+        Store::check_lease(self, capability, node_id, generation, now)
     }
     fn assign_lease(
         &self,
         capability: &str,
         to_node: &str,
         to_name: &str,
-        owner_epoch: &str,
         now: i64,
         ttl_ms: i64,
     ) -> Result<i64> {
-        Store::assign_lease(self, capability, to_node, to_name, owner_epoch, now, ttl_ms)
+        Store::assign_lease(self, capability, to_node, to_name, now, ttl_ms)
     }
     fn release_lease(
         &self,
         capability: &str,
         node_id: &str,
-        epoch: &str,
         generation: i64,
     ) -> Result<bool> {
-        Store::release_lease(self, capability, node_id, epoch, generation)
+        Store::release_lease(self, capability, node_id, generation)
     }
     fn lease_holder(&self, capability: &str) -> Result<Option<LeaseHolder>> {
         Store::lease_holder(self, capability)
@@ -322,7 +304,6 @@ pub struct ClaimParams {
     pub capability: String,
     pub node_id: String,
     pub node_name: String,
-    pub epoch: String,
     pub now: i64,
     pub ttl_ms: i64,
 }
@@ -332,7 +313,6 @@ pub struct ClaimParams {
 pub struct RenewParams {
     pub capability: String,
     pub node_id: String,
-    pub epoch: String,
     pub generation: i64,
     pub now: i64,
     pub ttl_ms: i64,
@@ -343,7 +323,6 @@ pub struct RenewParams {
 pub struct CheckParams {
     pub capability: String,
     pub node_id: String,
-    pub epoch: String,
     pub generation: i64,
     pub now: i64,
 }
@@ -354,7 +333,6 @@ pub struct AssignParams {
     pub capability: String,
     pub to_node: String,
     pub to_name: String,
-    pub owner_epoch: String,
     pub now: i64,
     pub ttl_ms: i64,
 }
@@ -364,7 +342,6 @@ pub struct AssignParams {
 pub struct ReleaseParams {
     pub capability: String,
     pub node_id: String,
-    pub epoch: String,
     pub generation: i64,
 }
 

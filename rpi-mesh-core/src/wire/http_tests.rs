@@ -160,7 +160,7 @@ fn http_mode_round_trips_and_enforces_auth() {
     assert_eq!(registered.name, "home");
     assert!(matches!(
         client
-            .claim_lease("wechat", "n1", "home", "e1", 1_000_000, 20_000)
+            .claim_lease("wechat", "n1", "home", 1_000_000, 20_000)
             .unwrap(),
         Claim::Granted { .. }
     ));

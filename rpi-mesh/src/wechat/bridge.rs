@@ -365,7 +365,6 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
             .map(str::to_string);
         from_state
             .or((!ctx.cursor.is_empty()).then(|| ctx.cursor.clone()))
-            .or_else(|| hub.store().legacy_cursor())
             .unwrap_or_default()
     };
     let mut seen: HashSet<String> = HashSet::new();

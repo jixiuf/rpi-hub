@@ -130,7 +130,6 @@ impl Hub {
             Arc::clone(&mesh.store) as Arc<dyn rpi_mesh_core::api::HubStore>,
             mesh.node_id.clone(),
             mesh.name(),
-            mesh.epoch.clone(),
             mesh.config.lease.ttl_ms(),
         );
         Arc::new(Self {
