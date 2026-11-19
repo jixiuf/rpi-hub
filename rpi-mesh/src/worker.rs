@@ -19,9 +19,6 @@ const DISPATCH: Duration = Duration::from_millis(300);
 const CONTEXT: Duration = Duration::from_secs(15);
 const PRUNE: Duration = Duration::from_secs(60);
 
-/// Longest a `hub_ask` waits for the target's reply.
-const ASK_TIMEOUT_MS: i64 = 10 * 60 * 1000;
-
 pub fn run(hub: Arc<Hub>) {
     if let Err(error) = register(&hub) {
         hub.record_error(format!("cannot register instance: {error}"));
@@ -184,30 +181,69 @@ fn handle_text(hub: &Arc<Hub>, envelope: &Envelope) {
     // as "nothing happened" in the target window. A display-only notice gives
     // immediate, model-free visibility.
     let _ = hub.notice(&format!("📨 {}: {}", envelope.from_name, text));
+
+    // Correlated asks use the host's SYNCHRONOUS run outcome instead of the
+    // pending-queue + MessageEnd guessing: `SendUserMessage` blocks until the
+    // run settles and returns the final text. This kills both the silent-
+    // loss bug (an ask whose injection never starts a run used to pend for
+    // 10 minutes then die) and the FIFO misattribution bug (a reply landing
+    // on the OLDEST pending ask instead of its own).
+    //
+    // This runs on the worker thread; a long ask occupies it, but the worker
+    // is the only mailbox drainer anyway — dispatch() is sequential by
+    // design, and a concurrent /msg to this instance just queues behind.
+    if envelope.correlation.is_some() {
+        let _ = hub.notice("（ask 任务已开始，回复会自动传回发起方）");
+        match hub.send_user_message_outcome(&text, Some("steer")) {
+            Ok(outcome) => {
+                let status = outcome.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                match status {
+                    "completed" => {
+                        let text = outcome
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        reply(hub, envelope, true, text);
+                    }
+                    "aborted" | "error" => {
+                        let reason = outcome
+                            .get("stopReason")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| outcome.get("status").and_then(|v| v.as_str()))
+                            .unwrap_or("unknown")
+                            .to_string();
+                        reply(hub, envelope, false, format!("目标回合异常结束: {reason}"));
+                    }
+                    // Queued behind an active run / appended without a run:
+                    // the host gives no completion signal we could wait on.
+                    // Fail fast with the truth instead of hanging silently.
+                    other => {
+                        let detail = if other.is_empty() {
+                            String::new()
+                        } else {
+                            format!("（宿主状态: {other}）")
+                        };
+                        reply(
+                            hub,
+                            envelope,
+                            false,
+                            format!("目标正忙，消息已排队而非立即执行{}；请稍后重发", detail),
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                reply(hub, envelope, false, format!("投递失败: {error}"));
+            }
+        }
+        return;
+    }
+
+    // Plain /msg: fire-and-forget, never blocks the mailbox on a run.
     if let Err(error) = hub.send_user_message(&text, Some("steer")) {
         hub.record_error(format!("cannot deliver message: {error}"));
         reply(hub, envelope, false, format!("投递失败: {error}"));
-        return;
-    }
-    if let Some(correlation) = &envelope.correlation {
-        let pending = hub.pending.lock().unwrap_or_else(|p| p.into_inner()).len();
-        // Bound the pending list: stale asks must not grow without limit.
-        if pending > 16 {
-            hub.pending
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .remove(0);
-        }
-        hub.pending
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(hub::PendingAsk {
-                correlation: correlation.clone(),
-                to_node: envelope.from_node.clone(),
-                to_name: envelope.from_name.clone(),
-                created_at: now_ms(),
-                deadline: now_ms() + ASK_TIMEOUT_MS,
-            });
     }
 }
 

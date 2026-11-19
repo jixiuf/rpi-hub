@@ -26,16 +26,6 @@ use rpi_plugin_sdk::{PluginApi, RuntimeActionFn, RuntimeActionId, StbString, Stb
 /// How long an instance is considered alive without a heartbeat.
 pub const ALIVE_MS: i64 = 30_000;
 
-/// A correlated `hub_ask` in flight.
-#[derive(Debug, Clone)]
-pub struct PendingAsk {
-    pub correlation: String,
-    pub to_node: String,
-    pub to_name: String,
-    pub created_at: i64,
-    pub deadline: i64,
-}
-
 #[derive(Debug, Clone)]
 pub struct ReplyOutcome {
     pub ok: bool,
@@ -110,7 +100,6 @@ pub struct Hub {
     host_free: rpi_plugin_sdk::FreeStringFn,
     shutdown: Shutdown,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
-    pub pending: Mutex<Vec<PendingAsk>>,
     pub replies: Mutex<HashMap<String, ReplyOutcome>>,
     pub last_error: Mutex<Option<String>>,
 }
@@ -189,7 +178,6 @@ impl Hub {
             host_free: api.free_string,
             shutdown: Shutdown::new(),
             worker: Mutex::new(None),
-            pending: Mutex::new(Vec::new()),
             replies: Mutex::new(HashMap::new()),
             last_error: Mutex::new(None),
         })
@@ -329,6 +317,27 @@ impl Hub {
     }
 
     /// Feed text into this instance's agent lane.
+    /// Drive a run from a user-text message and wait for the outcome.
+    ///
+    /// The host's `SendUserMessage` returns the run result synchronously
+    /// (`status: completed|aborted|...` plus the final text when completed),
+    /// which makes the whole `pending`-queue + `MessageEnd`-guessing reply
+    /// path obsolete for correlated asks: the answer IS the return value.
+    /// `Ok(None)` text means the message was queued (`steer` behind an
+    /// active run) or appended without a run — the caller decides whether
+    /// that is acceptable.
+    pub fn send_user_message_outcome(
+        &self,
+        text: &str,
+        deliver_as: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let mut args = serde_json::json!({ "text": text, "triggerTurn": true });
+        if let Some(deliver_as) = deliver_as {
+            args["deliverAs"] = serde_json::json!(deliver_as);
+        }
+        self.action(RuntimeActionId::SendUserMessage, args)
+    }
+
     pub fn send_user_message(&self, text: &str, deliver_as: Option<&str>) -> Result<(), String> {
         let mut args = serde_json::json!({ "text": text, "triggerTurn": true });
         if let Some(deliver_as) = deliver_as {
