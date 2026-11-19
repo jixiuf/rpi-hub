@@ -1,0 +1,28 @@
+[package]
+name = "rpi-mesh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Single-plugin multi-instance coordination for rpi: presence, mailbox, lease election and channel implementations (wechat)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+# none; build.rs only shells out to `date`
+
+[dependencies]
+rpi-mesh-core = { workspace = true }
+rpi-plugin-sdk = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["rt", "time", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rand = "0.8"
+base64 = "0.22"
+qrcode = "0.14"
+aes = "0.8"
+ecb = "0.1"
+md-5 = "0.10"
+libc = { workspace = true }
+uuid = { workspace = true }

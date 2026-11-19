@@ -1,25 +1,35 @@
 # AGENTS.md
 
 rpi 的多实例协同插件仓库：实例发现、互发消息/指令、任务委派、微信接管的可切换租约。
-三个 crate：`rpi-hub-core`（共享库，无 ABI）、`rpi-hub` 与 `rpi-wechat`（cdylib 插件）。
+**单一插件架构**（feat/mesh-redesign 起）：`rpi-mesh-core`（共享库，无 ABI）+
+`rpi-mesh`（唯一 cdylib 插件，同时拥有 presence/信箱/租约/通道实现）。旧的双插件
+（rpi-hub + rpi-wechat）已删除——双 dylib 各自静态链接 core，进程全局物两份，
+是一整类协调 bug 的根源，见 docs/architecture.md §1。
 
 ## 常用命令
 
 ```bash
-cargo build -p rpi-hub -p rpi-wechat          # 插件 dylib
-cargo test -p rpi-hub-core -p rpi-hub --locked # 单测（45 core + 10 plugin）
-scripts/smoke.sh <rpi 二进制路径>              # 真宿主端到端（见下：目前实例数断言失败）
-rpi dev -P rpi-hub                            # 编译 + watch + 自动 reload
-rpi dev-local -P rpi-hub                      # 只加载本扩展，隔离排查
+cargo build -p rpi-mesh                       # 插件 dylib
+cargo test -p rpi-mesh-core -p rpi-mesh --locked # 单测（61 core + 27 plugin）
+scripts/smoke.sh <rpi 二进制路径>              # 真宿主端到端（全绿）
+rpi dev -P rpi-mesh                           # 编译 + watch + 自动 reload
+rpi dev-local -P rpi-mesh                     # 只加载本扩展，隔离排查
 ```
 
 ## 约束（改代码前必读）
 
-- 插件只准依赖 `rpi-plugin-sdk`，共享代码放 `rpi-hub-core`。不许链接宿主 crate。
+- 插件只准依赖 `rpi-plugin-sdk`，共享代码放 `rpi-mesh-core`。不许链接宿主 crate。
+- **一个进程只有一份身份**：node_id/epoch/store/config 全部在 `mesh::hub::Hub`，
+  `wechat::hub::Hub` 只包一层（`mesh` 字段）+ 通道自有状态。禁止再建第二份
+  node_id/epoch/store。
+- **wechat footer 只有两个写者**：owner 循环（持有中）与 watcher（非持有）。
+- **租约只有一个写者**：`wechat::owner`（OwnerLoop）。桥只读 `lease_alive` 标志。
 - 每个 `extern "C"` 边界用 `guard`/`guard_or` 兜 panic；每个注册槽位都是 `Option`，旧宿主没有就降级。
 - 回调预算见 `docs/plugin-authoring.md` §3：命令 handler 微秒级，事件只入队，网络和长事务一律丢 worker。
 - 参数建议器是全量候选列表契约，不要按 `args` 过滤，见 `docs/plugin-authoring.md` §3.5。
 - 参数、文本、队列、响应都要有上限。
+- **跨 dylib 不存在进程内信号**：一个 rlib 被两个 dylib 静态链接时全局物两份。
+  mesh 是单 dylib，如果未来再拆插件，记住这个教训（Condvar 信号会静默失效）。
 
 ## 格式化与 lint
 

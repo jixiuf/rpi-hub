@@ -7,7 +7,7 @@
 
 - 插件是 **Rust `cdylib`**，宿主用 `libloading` 加载，只查找一个符号 `rpi_plugin_register`。
 - 依赖只允许 `rpi-plugin-sdk`（ABI 契约）。**不要**链接 `rpi-cli` / `rpi-extensions` / `rpi-harness`。
-- 需要共享代码时用普通 `rlib`（本仓库的 `rpi-hub-core`），不要让它依赖宿主。
+- 需要共享代码时用普通 `rlib`（本仓库的 `rpi-mesh-core`），不要让它依赖宿主。
 
 ```toml
 [package]
@@ -171,10 +171,10 @@ handler 里**不能 free** 事件字符串；用 `EventView` 的 accessor 拷贝
 ## 8. 开发与安装
 
 ```bash
-rpi dev -P rpi-hub          # 编译 + watch + 自动 reload（多包 workspace 必须 -P）
-rpi dev-local -P rpi-hub    # 只加载本扩展，隔离排查
+rpi dev -P rpi-mesh         # 编译 + watch + 自动 reload（多包 workspace 必须 -P）
+rpi dev-local -P rpi-mesh   # 只加载本扩展，隔离排查
 cargo test                  # 纯 Rust 单测，不需要宿主
-rpi install --path ./rpi-hub
+rpi install --path ./rpi-mesh
 ```
 
 `rpi install --path` 会执行 `cargo build --release --package <name>`，产物装到

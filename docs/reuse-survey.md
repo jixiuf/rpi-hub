@@ -1,5 +1,11 @@
 # 可复用资产调研（rpi-package / 在线目录）
 
+> **注**（feat/mesh-redesign 起）：本文写于双插件时期；文中 `rpi-hub-core` 已更名
+> `rpi-mesh-core`，`rpi-wechat` 已并入 `rpi-mesh`。调研结论（自研协调层、对齐
+> im-message 形状、relay 借鉴 rpi-server）仍然成立。
+
+
+
 结论先说：**多实例 presence + 租约 + 信箱这一层没有现成包，必须自己实现**；
 但传输、身份语义、IM 通道 UX 都有可直接对齐或借鉴的成熟实现。
 
