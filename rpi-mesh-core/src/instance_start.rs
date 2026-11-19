@@ -280,8 +280,16 @@ pub fn stop(ctx: &SpawnContext<'_>, query: &str, now: i64) -> Result<String, Str
     }
     // No multiplexer involvement: the presence row's pid is authoritative.
     // SIGTERM lets the plugin lifecycle release the wechat lease and
-    // unregister cleanly; the pane closes itself when its leading process
-    // exits (same in tmux and screen).
+    // unregister cleanly.
+    //
+    // BEFORE killing: snapshot the parent. If the instance was started
+    // MANUALLY inside a shell pane (pane leader = the user's shell, rpi =
+    // its child), killing the rpi leaves an idle shell behind and the
+    // window stays. If that shell hosts nothing else, TERM it after the
+    // instance so the window closes; if the user has other work in it,
+    // leave it alone and say so. After the kill the process is gone and
+    // ppid can no longer be read — hence the snapshot ordering.
+    let parent_snapshot = parent_shell_of(target.pid);
     let status = Command::new("kill")
         .args(["-TERM", &target.pid.to_string()])
         .status()
@@ -289,14 +297,95 @@ pub fn stop(ctx: &SpawnContext<'_>, query: &str, now: i64) -> Result<String, Str
     if !status.success() {
         return Err(format!("kill -TERM {} 失败", target.pid));
     }
-    Ok(format!("✅ 已停止 {}", target.label()))
+    match parent_snapshot {
+        ShellParent::LoneShell(parent) => {
+            let _ = Command::new("kill").args(["-TERM", &parent.to_string()]).status();
+            Ok(format!(
+                "✅ 已停止 {}\n（其父 shell 已一并退出，window 已关闭）",
+                target.label()
+            ))
+        }
+        ShellParent::ShellWithOtherWork(parent) => Ok(format!(
+            "✅ 已停止 {}\n（其所在 shell（pid {parent}）还有其它进程，window 未关闭）",
+            target.label()
+        )),
+        ShellParent::None => Ok(format!("✅ 已停止 {}", target.label())),
+    }
 }
 
-/// Find the tmux session whose cwd matches the target (not a name guess).
-/// Where the target instance runs: `(session, window)` discovered by cwd via
-/// list-windows (covers BOTH placements — dedicated sessions and windows).
+/// The instance's parent shell, classified BEFORE it is killed.
+#[cfg(unix)]
+enum ShellParent {
+    /// Parent is a shell whose only child is the instance: killing the shell
+    /// closes the window.
+    LoneShell(u32),
+    /// Parent is a shell but hosts other processes too: leave it.
+    ShellWithOtherWork(u32),
+    /// Parent is not a shell (instance is its pane's leader — the /start
+    /// placement), or the process tree could not be read.
+    None,
+}
 
-/// The window-name candidate for a target (basename of its cwd).
+#[cfg(unix)]
+fn parent_shell_of(instance_pid: u32) -> ShellParent {
+    let Some(parent) = parent_pid(instance_pid) else {
+        return ShellParent::None;
+    };
+    if !is_shell(parent) {
+        return ShellParent::None;
+    }
+    match child_pids(parent) {
+        Some(children) if children.iter().all(|c| *c == instance_pid) => {
+            ShellParent::LoneShell(parent)
+        }
+        Some(_) => ShellParent::ShellWithOtherWork(parent),
+        None => ShellParent::None,
+    }
+}
+
+#[cfg(unix)]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let output = Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()
+}
+
+#[cfg(unix)]
+fn is_shell(pid: u32) -> bool {
+    let Ok(output) = Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    let command = String::from_utf8_lossy(&output.stdout);
+    let base = command
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    matches!(base.as_str(), "sh" | "bash" | "zsh" | "dash" | "fish")
+}
+
+#[cfg(unix)]
+fn child_pids(pid: u32) -> Option<Vec<u32>> {
+    let output = Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+        .ok()?;
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect(),
+    )
+}
 
 fn rows(ctx: &SpawnContext<'_>) -> Result<Vec<String>, String> {
     let now = now_ms();
