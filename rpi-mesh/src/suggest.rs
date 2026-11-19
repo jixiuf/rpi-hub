@@ -1,4 +1,4 @@
-//! Argument suggestions for `/msg` `/cmd` `/ask` `/use`.
+//! Argument suggestions for `/msg` `/ask` `/use` `/stop`.
 //!
 //! Contract (pi-rust PR #338, **full-candidate-list mode**): the host caches
 //! the response **per command** and narrows it locally against the typed
