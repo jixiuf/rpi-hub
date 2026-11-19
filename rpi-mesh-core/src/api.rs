@@ -118,7 +118,6 @@ pub trait HubStore: Send + Sync + std::fmt::Debug {
         None
     }
     fn set_channel_state(&self, _capability: &str, _state: &serde_json::Value) {}
-    /// Legacy kv cursor (v1 schema) — read-only migration source.
     /// Drop presence rows of same-host pids that are demonstrably dead
     /// (`kill(pid, 0)` fails). Only the local Store reaps; remote clients
     /// keep the no-op default (a foreign machine's pids are meaningless
@@ -174,7 +173,6 @@ impl HubStore for Store {
         None
     }
     fn set_channel_state(&self, _capability: &str, _state: &serde_json::Value) {}
-    /// Legacy kv cursor (v1 schema) — read-only migration source.
     /// Drop presence rows of same-host pids that are demonstrably dead
     /// (`kill(pid, 0)` fails). Only the local Store reaps; the default (and
     /// the relay client's) is a no-op because a foreign machine's pids are

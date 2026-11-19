@@ -155,18 +155,18 @@ pub struct ChannelConfig {
     pub enabled: bool,
 }
 
-/// `/start` launch mode. Only `tmux` is implemented; `none` disables the
-/// command. Unknown values fall back to tmux with a startup warning.
+/// `/start` placement. The default is automatic and needs no config: a
+/// WINDOW in the current tmux session when this rpi runs inside tmux
+/// ($TMUX set), a dedicated detached session otherwise. `none` disables
+/// the command. Old spellings (`tmux`, `currentSession`, `current`) map
+/// to the default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SpawnMode {
-    /// `tmux new-session -d` (the default) — crash-visible, attachable.
+    /// Automatic placement (window in current session when inside tmux).
     #[default]
-    Tmux,
-    /// A new WINDOW inside the CURRENT tmux session (requires the host rpi
-    /// process to run inside tmux; falls back to a new session when $TMUX is
-    /// absent).
-    CurrentSession,
+    #[serde(alias = "tmux", alias = "currentSession", alias = "current")]
+    Auto,
     /// `/start` disabled on this machine.
     None,
 }
@@ -232,8 +232,7 @@ impl InstanceSpawnConfig {
     /// The launch label used in warnings (`tmux`/`none`).
     pub fn mode_label(&self) -> &'static str {
         match self.mode {
-            SpawnMode::Tmux => "tmux",
-            SpawnMode::CurrentSession => "current",
+            SpawnMode::Auto => "auto",
             SpawnMode::None => "none",
         }
     }
@@ -375,6 +374,20 @@ mod tests {
         // The default TTL must outlast the wechat bridge's 40s long poll.
         assert_eq!(lease.ttl_ms(), 60_000);
         assert!(lease.validate().is_empty());
+    }
+
+    #[test]
+    fn spawn_mode_legacy_spellings_map_to_auto() {
+        // The README/config docs historically used "current"; the camelCase
+        // rename made that unparseable. Both spellings must load.
+        for spelling in ["current", "currentSession"] {
+            let text = format!(
+                r#"{{"instanceSpawn": {{"mode": "{}"}}}}"#,
+                spelling
+            );
+            let config: HubConfig = serde_json::from_str(&text).unwrap();
+            assert_eq!(config.instance_spawn.mode, SpawnMode::Auto);
+        }
     }
 
     #[test]

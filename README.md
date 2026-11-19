@@ -106,7 +106,7 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
   "remote": { "mode": "local", "relay": {} },
   "channels": { "wechat": { "enabled": true } },
   "limits": { "maxTextBytes": 65536, "inboxBatch": 32 },
-  "instanceSpawn": { "mode": "tmux", "sessionPrefix": "rpi", "command": "rpi", "tmuxCommand": "tmux" }
+  "instanceSpawn": { "sessionPrefix": "rpi", "command": "rpi", "tmuxCommand": "tmux" }
 }
 ```
 

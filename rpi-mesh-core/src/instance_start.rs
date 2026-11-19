@@ -189,11 +189,8 @@ fn expand_home(arg: &str) -> String {
 
 /// `/start [cwd]`: launch a new instance and confirm via the presence table.
 pub fn start(ctx: &SpawnContext<'_>, cwd_arg: Option<&str>) -> Result<String, String> {
-    match ctx.spawn.mode {
-        SpawnMode::Tmux | SpawnMode::CurrentSession => {}
-        SpawnMode::None => {
-            return Err("本机配置禁用了 /start（instanceSpawn.mode = none）".to_string())
-        }
+    if ctx.spawn.mode == SpawnMode::None {
+        return Err("本机配置禁用了 /start（instanceSpawn.mode = none）".to_string());
     }
     let cwd: PathBuf = match cwd_arg.map(str::trim).filter(|s| !s.is_empty()) {
         Some(arg) => {
@@ -220,17 +217,19 @@ pub fn start(ctx: &SpawnContext<'_>, cwd_arg: Option<&str>) -> Result<String, St
     }
     let base = session_base(&cwd);
     let before = rows(ctx)?;
-    // Two placements: a WINDOW in the current session (mode=current, requires
-    // $TMUX — falls back to a dedicated session), or a dedicated session.
-    let placement = match ctx.spawn.mode {
-        SpawnMode::CurrentSession => {
-            current_session(tmux).map(|session| Placement::Window(session))
-        }
-        _ => Ok(Placement::Session(next_session_name(
+    // Placement: a WINDOW in the current tmux session when this rpi runs
+    // inside tmux ($TMUX set), a dedicated detached session otherwise.
+    // That is the DEFAULT behavior — a fresh machine needs no config. The
+    // only config knob left is `none` (disable /start); `tmux` and
+    // `currentSession` are accepted legacy spellings of the same default.
+    let placement = if std::env::var_os("TMUX").is_some() {
+        current_session(tmux).map(Placement::Window)
+    } else {
+        Ok(Placement::Session(next_session_name(
             &ctx.spawn.session_prefix,
             tmux,
             &base,
-        ))),
+        )))
     };
     let placement = placement.map_err(|e| format!("tmux 会话探测失败: {e}"))?;
     match &placement {

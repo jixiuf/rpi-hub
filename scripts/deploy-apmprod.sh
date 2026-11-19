@@ -26,7 +26,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 echo "==> syncing rpi-mesh source"
-rsync -az --exclude target --exclude .git --exclude .rpi \
+rsync -az --delete --exclude target --exclude .git --exclude .rpi \
   --exclude '.hub-pr' \
   "$HERE/" "$HOST:$REMOTE_SRC/"
 
