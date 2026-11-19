@@ -423,6 +423,15 @@ impl Hub {
     /// `owner_epoch` is empty here: the target instance claims the lease with
     /// its own epoch on its next lease tick (same owner_node → resume branch).
     pub fn switch_lease_to(&self, target: &InstanceView) -> Result<String, String> {
+        // Self hand-off is a no-op — and with same-name sibling instances it
+        // is almost always a Tab-completion misclick. Refuse with the
+        // holder-aware hint instead.
+        if target.node_id == self.node_id {
+            return Ok(format!(
+                "微信接管已在本实例（{}），无需切换",
+                target.label()
+            ));
+        }
         let admin = rpi_hub_core::lease::LeaseAdmin::new(
             Arc::clone(&self.store),
             self.config.lease.ttl_ms(),

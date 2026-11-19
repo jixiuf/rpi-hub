@@ -342,7 +342,14 @@ extern "C" fn cmd_cmd(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
         let target = hub.resolve_target(&target_query)?;
         let intent = CommandIntent::parse(&command).map_err(|e| e.to_string())?;
         if target.node_id == hub.node_id {
-            return intent::execute(&hub, &intent).map(Reply::Text);
+            // Same-name trap: the Tab completion value for THIS instance's
+            // row is identical to the label the user meant to pick on a
+            // sibling instance. Executing management intents (new/fork/…)
+            // locally would silently discard the caller's session context.
+            return Err(format!(
+                "目标是自己（{}）——/cmd 用于控制其他实例。管理命令请直接在 TUI 输入；若要选同名的其他实例，用编号或完整 name@host",
+                target.label()
+            ));
         }
         // 带 correlation：目标执行完会把结果作为 Reply 投回本实例，worker
         // 收到后以通知形式展示（否则结果只会出现在目标自己的会话里）。

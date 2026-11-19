@@ -322,8 +322,10 @@ fn run_cmd(params: &str) -> Result<CmdOutcome, String> {
     let intent = CommandIntent::parse(param_str(&params, "command")?).map_err(|e| e.to_string())?;
 
     if target.node_id == hub.node_id {
-        let text = intent::execute(&hub, &intent)?;
-        return Ok(CmdOutcome::Local(text));
+        return Err(format!(
+            "目标是自己（{}）——hub_cmd 用于控制其他实例。管理命令直接用 TUI 斜杠命令执行",
+            target.label()
+        ));
     }
 
     let correlation = rpi_hub_core::protocol::new_id();
