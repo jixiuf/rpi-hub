@@ -178,6 +178,11 @@ fn dispatch(hub: &Arc<Hub>) {
 
 fn handle_text(hub: &Arc<Hub>, envelope: &Envelope) {
     let text = envelope.text.clone().unwrap_or_default();
+    // Make the incoming /msg visible in the target transcript: steer messages
+    // ride the agent queue (and may wait behind the active turn), which read
+    // as "nothing happened" in the target window. A display-only notice gives
+    // immediate, model-free visibility.
+    let _ = hub.notice(&format!("📨 {}: {}", envelope.from_name, text));
     if let Err(error) = hub.send_user_message(&text, Some("steer")) {
         hub.record_error(format!("cannot deliver message: {error}"));
         reply(hub, envelope, false, format!("投递失败: {error}"));
