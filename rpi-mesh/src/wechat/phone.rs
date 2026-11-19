@@ -63,15 +63,18 @@ pub fn parse(text: &str) -> Option<WxCommand> {
     if text == "/start" {
         return Some(WxCommand::Start(None));
     }
+    // /start's argument is a PATH — absolute paths (leading '/') are valid
+    // and common ("/start /tmp"); the command-like guard only applies to
+    // instance-name arguments (/use, /msg, /ask).
     if let Some(arg) = text.strip_prefix("/start ") {
         let arg = arg.trim();
-        if !arg.is_empty() && !arg.starts_with('/') {
+        if !arg.is_empty() {
             return Some(WxCommand::Start(Some(arg.to_string())));
         }
     }
     if let Some(arg) = text.strip_prefix("/stop ") {
         let arg = arg.trim();
-        if !arg.is_empty() && !arg.starts_with('/') {
+        if !arg.is_empty() {
             return Some(WxCommand::Stop(arg.to_string()));
         }
     }
@@ -401,6 +404,16 @@ mod tests {
         // `/use` with a command-like argument is not a command. ("/use " with
         // trailing whitespace trims to bare `/use` = render the list + hint.)
         assert!(parse("/use /instances").is_none());
+        // /start's argument is a PATH: absolute paths are commands.
+        assert!(matches!(
+            parse("/start /tmp"),
+            Some(WxCommand::Start(Some(ref a))) if a == "/tmp"
+        ));
+        assert!(matches!(
+            parse("/start ~/projects"),
+            Some(WxCommand::Start(Some(ref a))) if a == "~/projects"
+        ));
+        assert!(matches!(parse("/start"), Some(WxCommand::Start(None))));
         // Ordinary text and code snippets are untouched.
         assert!(parse("hello /instances world").is_none());
         assert!(parse("look at /use 3 in the docs").is_none());
