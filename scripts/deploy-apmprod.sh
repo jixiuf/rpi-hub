@@ -51,7 +51,7 @@ cat >"$WORK/restart.sh" <<REMOTE
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 pkill -f "session-dir /tmp/$SESSION" 2>/dev/null || true
 sleep 1
-tmux new-session -d -s "$SESSION" "/home/admin/.cargo/bin/rpi --session-dir /tmp/$SESSION"
+tmux new-session -d -s "$SESSION" "rpi --session-dir /tmp/$SESSION"
 REMOTE
 scp -q -o BatchMode=yes "$WORK/restart.sh" "$HOST:/tmp/$SESSION-restart.sh"
 "${SSH[@]}" "sh /tmp/$SESSION-restart.sh"

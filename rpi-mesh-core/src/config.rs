@@ -172,6 +172,7 @@ pub enum SpawnMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceSpawnConfig {
+    #[serde(default)]
     pub mode: SpawnMode,
     /// tmux session-name prefix (`rpi-<base>` → `<prefix>-<base>`).
     #[serde(default = "default_session_prefix")]
@@ -372,6 +373,15 @@ mod tests {
         // The default TTL must outlast the wechat bridge's 40s long poll.
         assert_eq!(lease.ttl_ms(), 60_000);
         assert!(lease.validate().is_empty());
+    }
+
+    #[test]
+    fn instance_spawn_mode_is_optional() {
+        // Omitting `mode` entirely must load as Auto (the default), not fail
+        // the whole config into the broken-file fallback.
+        let config: HubConfig =
+            serde_json::from_str(r#"{"instanceSpawn": {"command": "rpi"}}"#).unwrap();
+        assert_eq!(config.instance_spawn.mode, SpawnMode::Auto);
     }
 
     #[test]
