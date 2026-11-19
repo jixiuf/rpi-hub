@@ -4,7 +4,7 @@
 //! whitelist — including any other `/foo` like `/etc/hosts` — stays a normal
 //! message for the agent.
 //!
-//! Single source for the list: `rpi-hub-core::render` (same ordering the TUI
+//! Single source for the list: `rpi-mesh-core::render` (same ordering the TUI
 //! shows), so `/use 3` anchors to the list the user just saw. The lease
 //! hand-off goes through `LeaseAdmin` (the user-command path of the PR-2
 //! capability split) and works across machines: the store is the shared

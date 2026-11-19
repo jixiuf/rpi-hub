@@ -213,7 +213,7 @@ impl Hub {
     /// is fenced out on its first tick (the LeaseLost-on-startup bug).
     pub fn claim_wechat(&self) -> Result<Claim, String> {
         let now = now_ms();
-        // The facade (rpi-hub-core::lease::LeaseOwner) carries claim + the
+        // The facade (rpi-mesh-core::lease::LeaseOwner) carries claim + the
         // dead-owner takeover branch; this method only records the resulting
         // generation for the bridge's fence gate.
         let claim = self.lease_owner.claim("wechat", now)?;

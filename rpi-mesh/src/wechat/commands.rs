@@ -443,7 +443,7 @@ pub fn spawn_watcher(hub: Arc<Hub>, credentials: Credentials) {
         .spawn(move || {
             // 200ms fact poll (see owner.rs FACT_POLL: cross-dylib
             // Condvars are impossible — each plugin static-links its own
-            // copy of rpi-hub-core globals). An assign envelope to THIS
+            // copy of rpi-mesh-core globals). An assign envelope to THIS
             // instance becomes a running bridge — and a 💬 footer — within
             // ~0.5s of the /use hand-off; a fenced remote bridge flips the
             // footer to 🗨️ the moment its bridge thread exits.

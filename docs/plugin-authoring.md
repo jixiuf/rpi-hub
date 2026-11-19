@@ -171,10 +171,10 @@ handler 里**不能 free** 事件字符串；用 `EventView` 的 accessor 拷贝
 ## 8. 开发与安装
 
 ```bash
-rpi dev -P rpi-hub          # 编译 + watch + 自动 reload（多包 workspace 必须 -P）
-rpi dev-local -P rpi-hub    # 只加载本扩展，隔离排查
+rpi dev -P rpi-mesh         # 编译 + watch + 自动 reload（多包 workspace 必须 -P）
+rpi dev-local -P rpi-mesh   # 只加载本扩展，隔离排查
 cargo test                  # 纯 Rust 单测，不需要宿主
-rpi install --path ./rpi-hub
+rpi install --path ./rpi-mesh
 ```
 
 `rpi install --path` 会执行 `cargo build --release --package <name>`，产物装到

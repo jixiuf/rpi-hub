@@ -9,10 +9,11 @@
 //! | `envelopes` | the mailbox: ack'd point-to-point deliveries |
 //! | `seen` | inbound dedupe for IM message ids |
 //!
-//! Concurrency model: one `Connection` per plugin process, `busy_timeout`, and
-//! short `BEGIN IMMEDIATE` transactions for read-modify-write operations. There
-//! is no daemon, no socket and no lock file: two `rpi` processes in the same
-//! project on the same machine simply open the same file.
+//! Concurrency model: one `Connection` per rpi process (each running one mesh
+//! plugin), `busy_timeout`, and short `BEGIN IMMEDIATE` transactions for
+//! read-modify-write operations. There is no daemon, no socket and no lock
+//! file: two `rpi` processes in the same project on the same machine simply
+//! open the same file.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -269,8 +270,8 @@ impl Store {
 
     fn configure(conn: &Connection) -> Result<()> {
         conn.busy_timeout(Duration::from_millis(3_000))?;
-        // WAL + synchronous=FULL: multiple plugin processes (rpi-hub,
-        // rpi-wechat) share this database across frequent hard exits (TUI
+        // WAL + synchronous=FULL: multiple rpi processes (one mesh plugin
+        // each) share this database across frequent hard exits (TUI
         // restarts, SIGKILL). NORMAL can leave torn WAL frames on abrupt
         // death; FULL makes every commit durable so a kill never corrupts
         // the database (writes are low-frequency — the cost is negligible).

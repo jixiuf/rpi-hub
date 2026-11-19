@@ -1,4 +1,4 @@
-# rpi-hub 架构
+# rpi-mesh 架构
 
 ## 1. 拓扑
 
@@ -6,8 +6,8 @@
 办公机 (client)                          服务器 (relay, 常驻)
 ┌──────────────────────────┐             ┌──────────────────────────┐
 │ rpi instance A           │             │ rpi instance B           │
-│  rpi-hub ──┐             │   ssh -L    │  rpi-hub ──┐             │
-│  rpi-wechat│             │  (出站方向)  │  rpi-wechat│             │
+│  rpi-mesh ─┐             │  (出站方向)  │  rpi-mesh ─┐             │
+│  (单插件)  │             │             │  (单插件)  │             │
 └────────────┼─────────────┘             └────────────┼─────────────┘
              │                                        │
         hub.db (本地, 单机时)              hub.db (relay 侧, 跨机时)
@@ -21,7 +21,7 @@
   - 直连 JSON-RPC：行分隔 `{id,method,params}` → `{id,result|error}`，首帧必须 `authenticate`；
   - `"http": true`：`POST /hub-rpc`，token 在 `X-Hub-Auth` 头，一请求一 RPC。专为防火墙场景：
     只放行"转发到真实 HTTP 服务"的端口时，relay 用 HTTP 应答，其它路径 404，可让 nginx 按
-    路径反代到本机 relay。方法表见 `rpi-hub-core::api::method`；插件只看到
+    路径反代到本机 relay。方法表见 `rpi-mesh-core::api::method`；插件只看到
     `Arc<dyn HubStore>`，本地/远程同一套调用。
 - 客户端断线指数退避重连并自动重新认证；调用失败重试一次。relay 退出时 client 报
   `cannot reach the hub relay`（worker 300ms 重试，恢复即继续）。
@@ -43,7 +43,7 @@ kv(key PK, value)
 
 - `node_id = sha256(host ‖ cwd ‖ pid)[..16]`：**同一进程内跨 `/reload` 不变**（pid/cwd 不变），
   重启即变——正是租约需要的粒度。
-- **显示名 = 项目目录名**：`name@host` 直接表达"哪个项目在哪台机器"（如 `rpi-hub@office`、
+- **显示名 = 项目目录名**：`name@host` 直接表达"哪个项目在哪台机器"（如 `rpi-mesh@office`、
   `pi-rust@server`）。`instanceName` 只是整机手动覆盖项，**默认不要设**——同机多个会话
   全部同名只能靠 `-<pid>` 后缀区分，对使用者不可读；目录名天然区分。
 - `epoch`：每次插件加载生成一次，所有写都必须匹配，用来 fencing 旧加载遗留的线程。

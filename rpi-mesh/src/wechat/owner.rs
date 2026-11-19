@@ -37,7 +37,7 @@ pub fn spawn(hub: Arc<Hub>) -> std::thread::JoinHandle<()> {
 }
 
 /// Poll cadence for lease-fact checks. Cheap: one SQLite row read (WAL,
-/// <0.1ms). Note on cross-dylib signaling: rpi-hub-core is an rlib that
+/// <0.1ms). Note on cross-dylib signaling: rpi-mesh-core is an rlib that
 /// each plugin dylib static-links, so process-global Condvars are PER-DYLIB
 /// and a publish from the hub plugin can never wake the wechat plugin's
 /// threads. Honest polling at this cadence replaces the (dead) signal

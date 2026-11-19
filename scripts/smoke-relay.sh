@@ -15,7 +15,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST="${1:-${RELAY_HOST:-apmprod}}"
 KEEP="${KEEP:-0}"
-SESSION="${SESSION:-rpi-hub-smoke}"
+SESSION="${SESSION:-rpi-mesh-smoke}"
 LOCAL_RPI="${LOCAL_RPI:-rpi}"
 # Firewalls here only forward whitelisted ports. The relay can either own a
 # dedicated forwarded port (RELAY_PORT, raw JSON-RPC or http:true) or share a
@@ -39,7 +39,7 @@ if ! "${SSH[@]}" true 2>/dev/null; then
 fi
 
 REMOTE_HOME="$("${SSH[@]}" 'printf %s "$HOME"')"
-REMOTE_SRC="$REMOTE_HOME/rpi-hub-src"
+REMOTE_SRC="$REMOTE_HOME/rpi-mesh-src"
 # A run-private hub dir: the default one accumulates rows from earlier runs.
 REMOTE_HUB="/tmp/$SESSION-hub"
 HUB_TOKEN="$REMOTE_HUB/relay-token"
@@ -71,7 +71,7 @@ echo "==> syncing source to $HOST:$REMOTE_SRC"
 rsync -az --exclude target --exclude .rpi --exclude .git "$HERE/" "$HOST:$REMOTE_SRC/"
 
 echo "==> building rpi-hub on $HOST"
-"${SSH[@]}" "cd $REMOTE_SRC && cargo build -p rpi-hub >/dev/null"
+"${SSH[@]}" "cd $REMOTE_SRC && cargo build -p rpi-mesh >/dev/null"
 
 WORK="$(mktemp -d)"
 mkfifo "$WORK/in"

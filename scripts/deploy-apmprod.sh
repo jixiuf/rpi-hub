@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy rpi-hub (+rpi-wechat) to apmprod: sync source, build release, install
+# Deploy rpi-mesh to apmprod: sync source, build release, install
 # the dylibs into ~/.rpi/agent/extensions, and restart the relay session.
 #
 # The workspace pins rpi-plugin-sdk to a local path (the argument-suggester
@@ -25,7 +25,7 @@ REMOTE_PI_RUST="$REMOTE_HOME/repos/pi-rust"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "==> syncing rpi-hub source"
+echo "==> syncing rpi-mesh source"
 rsync -az --exclude target --exclude .git --exclude .rpi \
   --exclude '.hub-pr' \
   "$HERE/" "$HOST:$REMOTE_SRC/"
@@ -38,12 +38,10 @@ echo "==> rewriting the SDK path for the remote filesystem"
 "${SSH[@]}" "sed -i 's|path = \"/Users/jixiuf/repos/pi-rust/crates/rpi-plugin-sdk\"|path = \"$REMOTE_PI_RUST/crates/rpi-plugin-sdk\"|' $REMOTE_SRC/Cargo.toml"
 
 echo "==> building release"
-"${SSH[@]}" "cd $REMOTE_SRC && cargo build --release -p rpi-hub -p rpi-wechat"
+"${SSH[@]}" "cd $REMOTE_SRC && cargo build --release -p rpi-mesh"
 
 echo "==> installing into ~/.rpi/agent/extensions"
-"${SSH[@]}" "cp $REMOTE_SRC/target/release/librpi_hub.so \
-                   $REMOTE_SRC/target/release/librpi_wechat.so \
-                   ~/.rpi/agent/extensions/"
+"${SSH[@]}" "rm -f ~/.rpi/agent/extensions/librpi_hub.so ~/.rpi/agent/extensions/librpi_wechat.so && cp $REMOTE_SRC/target/release/librpi_mesh.so ~/.rpi/agent/extensions/"
 
 echo "==> restarting the relay session ($SESSION)"
 # The remote command goes through a script file (scp + sh) — inline quoting

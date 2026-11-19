@@ -83,7 +83,7 @@ pub struct Hub {
     pub dir: PathBuf,
     pub config: HubConfig,
     pub store: Arc<dyn HubStore>,
-    /// Read-only lease surface (rpi-hub-core::lease). The hub never claims.
+    /// Read-only lease surface (rpi_mesh_core::lease). The mesh never claims.
     pub lease_observer: rpi_mesh_core::lease::LeaseObserver,
     backend: Mutex<Option<crate::backends::Backends>>,
     pub host: String,
