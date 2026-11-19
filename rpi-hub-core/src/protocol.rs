@@ -30,6 +30,14 @@ pub enum EnvelopeKind {
     Reply,
     /// A notice that is displayed but never fed to the model.
     Notice,
+    /// A capability lease was assigned TO this node (`/use <target>`).
+    /// Displayed, and the channel plugin reacts by claiming + starting its
+    /// bridge immediately instead of waiting for its lease tick.
+    Assign,
+    /// A capability lease was taken AWAY from this node. Displayed so the
+    /// losing bridge learns about the hand-off from a fact, not from its
+    /// next failed renewal.
+    Unassign,
 }
 
 impl EnvelopeKind {
@@ -39,6 +47,8 @@ impl EnvelopeKind {
             EnvelopeKind::Cmd => "cmd",
             EnvelopeKind::Reply => "reply",
             EnvelopeKind::Notice => "notice",
+            EnvelopeKind::Assign => "assign",
+            EnvelopeKind::Unassign => "unassign",
         }
     }
 }
@@ -73,7 +83,9 @@ impl CommandIntent {
         let trimmed = text.trim();
         let trimmed = trimmed.strip_prefix('/').unwrap_or(trimmed);
         let mut parts = trimmed.split_whitespace();
-        let name = parts.next().ok_or_else(|| HubError::invalid("empty command"))?;
+        let name = parts
+            .next()
+            .ok_or_else(|| HubError::invalid("empty command"))?;
         if !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
@@ -119,6 +131,12 @@ pub struct Envelope {
     /// For `reply`: whether the target considered the request successful.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
+    /// For `assign`/`unassign`: which capability moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
+    /// For `assign`/`unassign`: the lease generation after the move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i64>,
     pub created_at: i64,
     pub expires_at: i64,
 }
@@ -143,6 +161,8 @@ impl Envelope {
             text: None,
             command: None,
             ok: None,
+            capability: None,
+            generation: None,
             created_at: now,
             expires_at: now + ttl_ms,
         }
@@ -236,6 +256,61 @@ impl Envelope {
         env
     }
 
+    /// `capability` was assigned to `to_node` (generation `generation`).
+    /// Sent by the assign path (`LeaseAdmin`) so the target starts serving
+    /// the channel immediately. `capability` is short ("wechat"), so no
+    /// truncation concerns; the text mirrors it for non-upgraded readers.
+    pub fn assign(
+        from_node: &str,
+        from_name: &str,
+        to_node: &str,
+        capability: &str,
+        generation: i64,
+        now: i64,
+    ) -> Self {
+        let mut env = Self::base(
+            new_id(),
+            EnvelopeKind::Assign,
+            from_node,
+            from_name,
+            to_node,
+            now,
+            COMMAND_TTL_MS,
+        );
+        env.capability = Some(capability.to_string());
+        env.generation = Some(generation);
+        env.text = Some(format!("{capability} 已交给你（generation {generation}）"));
+        env
+    }
+
+    /// Mirror of [`Envelope::assign`] for the losing owner: `capability`
+    /// moved to `new_owner_name` (generation `generation`).
+    pub fn unassign(
+        from_node: &str,
+        from_name: &str,
+        to_node: &str,
+        new_owner_name: &str,
+        capability: &str,
+        generation: i64,
+        now: i64,
+    ) -> Self {
+        let mut env = Self::base(
+            new_id(),
+            EnvelopeKind::Unassign,
+            from_node,
+            from_name,
+            to_node,
+            now,
+            COMMAND_TTL_MS,
+        );
+        env.capability = Some(capability.to_string());
+        env.generation = Some(generation);
+        env.text = Some(format!(
+            "{capability} 已移交 {new_owner_name}（generation {generation}）"
+        ));
+        env
+    }
+
     pub fn with_correlation(mut self, correlation: impl Into<String>) -> Self {
         self.correlation = Some(correlation.into());
         self
@@ -247,9 +322,22 @@ impl Envelope {
             EnvelopeKind::Cmd => format!(
                 "cmd {:?} {}",
                 self.command.as_ref().map(|c| c.name.as_str()).unwrap_or(""),
-                self.command.as_ref().map(CommandIntent::rest).unwrap_or_default()
+                self.command
+                    .as_ref()
+                    .map(CommandIntent::rest)
+                    .unwrap_or_default()
             ),
-            _ => format!("{} {} bytes", self.kind.as_str(), self.text.as_deref().map(str::len).unwrap_or(0)),
+            EnvelopeKind::Assign | EnvelopeKind::Unassign => format!(
+                "{} {} gen {}",
+                self.kind.as_str(),
+                self.capability.as_deref().unwrap_or(""),
+                self.generation.unwrap_or(0)
+            ),
+            _ => format!(
+                "{} {} bytes",
+                self.kind.as_str(),
+                self.text.as_deref().map(str::len).unwrap_or(0)
+            ),
         }
     }
 }
@@ -329,5 +417,20 @@ mod tests {
         let a = new_id();
         let b = new_id();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn assign_envelope_round_trips_through_json() {
+        let env = Envelope::assign("n1", "home", "n2", "wechat", 7, 1000);
+        assert_eq!(env.kind, EnvelopeKind::Assign);
+        assert_eq!(env.capability.as_deref(), Some("wechat"));
+        assert_eq!(env.generation, Some(7));
+        let json = serde_json::to_string(&env).unwrap();
+        let back: Envelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, env);
+
+        let out = Envelope::unassign("n1", "home", "n3", "beta", "wechat", 7, 1000);
+        assert_eq!(out.kind, EnvelopeKind::Unassign);
+        assert!(out.text.as_deref().is_some_and(|t| t.contains("beta")));
     }
 }

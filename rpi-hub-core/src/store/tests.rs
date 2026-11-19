@@ -208,17 +208,35 @@ fn transfer_bumps_the_generation_and_fences_the_previous_owner() {
         .claim_lease("wechat", "n1", "home", "e1", now, TTL)
         .unwrap();
     let generation = store
-        .transfer_lease("wechat", Some(("n1", "e1", 1)), "n2", "models", "e2", now + 1, TTL)
+        .transfer_lease(
+            "wechat",
+            Some(("n1", "e1", 1)),
+            "n2",
+            "models",
+            "e2",
+            now + 1,
+            TTL,
+        )
         .unwrap();
     assert_eq!(generation, 2);
     let holder = store.lease_holder("wechat").unwrap().unwrap();
     assert_eq!(holder.owner_node, "n2");
-    assert!(!store.renew_lease("wechat", "n1", "e1", 1, now + 2, TTL).unwrap());
+    assert!(!store
+        .renew_lease("wechat", "n1", "e1", 1, now + 2, TTL)
+        .unwrap());
     assert!(!store.check_lease("wechat", "n1", "e1", 1, now + 2).unwrap());
 
     // A stale `from` guard is rejected rather than silently re-transferring.
     let error = store
-        .transfer_lease("wechat", Some(("n1", "e1", 1)), "n3", "other", "new-epoch", now + 3, TTL)
+        .transfer_lease(
+            "wechat",
+            Some(("n1", "e1", 1)),
+            "n3",
+            "other",
+            "new-epoch",
+            now + 3,
+            TTL,
+        )
         .unwrap_err();
     assert!(error.to_string().contains("held by"));
 }
@@ -340,6 +358,87 @@ fn independent_connections_race_for_one_lease() {
 }
 
 #[test]
+fn lease_holder_reports_renewal_liveness() {
+    let (_dir, store) = file_store();
+    let now = 1_000_000;
+    let claim = store
+        .claim_lease("wechat", "n1", "home", "e1", now, TTL)
+        .unwrap();
+    let Claim::Granted { generation, .. } = claim else {
+        panic!("expected grant")
+    };
+    let holder = store.lease_holder("wechat").unwrap().unwrap();
+    assert_eq!(holder.updated_at, now);
+    assert_eq!(holder.expires_at, now + TTL);
+
+    // A renewal advances updated_at without moving the owner: watchers use
+    // this to tell "expired but actively renewing" from "expired and gone".
+    assert!(store
+        .renew_lease("wechat", "n1", "e1", generation, now + 5_000, TTL)
+        .unwrap());
+    let holder = store.lease_holder("wechat").unwrap().unwrap();
+    assert_eq!(holder.updated_at, now + 5_000);
+    assert_eq!(holder.expires_at, now + 5_000 + TTL);
+}
+
+#[test]
+fn assign_notifies_target_and_previous_owner() {
+    let (_dir, store) = file_store();
+    let store = std::sync::Arc::new(store);
+    let now = 1_000_000;
+    store
+        .claim_lease("wechat", "n1", "home", "e1", now, TTL)
+        .unwrap();
+    store
+        .register_instance(&record("n1", "home", "h1", 10, "e1", now), ALIVE)
+        .unwrap();
+    store
+        .register_instance(&record("n2", "models", "h1", 11, "e2", now), ALIVE)
+        .unwrap();
+
+    let admin = crate::lease::LeaseAdmin::new(store.clone(), TTL);
+    let target = store.get_instance("n2").unwrap().unwrap();
+    let generation = admin.assign_to("wechat", &target, now + 1).unwrap();
+    assert_eq!(generation, 2);
+
+    let inbox = |node: &str, at: i64| -> Vec<String> {
+        store
+            .inbox(node, at, 10)
+            .unwrap()
+            .into_iter()
+            .map(|envelope| envelope.kind.as_str().to_string())
+            .collect()
+    };
+    let target_kinds = inbox("n2", now + 2);
+    let old_kinds = inbox("n1", now + 2);
+    assert!(
+        target_kinds.contains(&"assign".to_string()),
+        "{target_kinds:?}"
+    );
+    assert!(old_kinds.contains(&"unassign".to_string()), "{old_kinds:?}");
+}
+
+#[test]
+fn assign_without_a_previous_owner_sends_only_the_assign() {
+    let (_dir, store) = file_store();
+    let store = std::sync::Arc::new(store);
+    let now = 1_000_000;
+    store
+        .register_instance(&record("n2", "models", "h1", 11, "e2", now), ALIVE)
+        .unwrap();
+    let admin = crate::lease::LeaseAdmin::new(store.clone(), TTL);
+    let target = store.get_instance("n2").unwrap().unwrap();
+    let generation = admin.assign_to("wechat", &target, now).unwrap();
+    assert_eq!(generation, 1);
+    let kinds: Vec<String> = store
+        .inbox("n2", now + 1, 10)
+        .unwrap()
+        .into_iter()
+        .map(|envelope| envelope.kind.as_str().to_string())
+        .collect();
+    assert_eq!(kinds, vec!["assign".to_string()]);
+}
+#[test]
 fn mailbox_round_trips_with_ack() {
     let (_dir, store) = file_store();
     let now = 1_000_000;
@@ -427,11 +526,8 @@ fn opening_a_newer_schema_fails_loudly() {
     {
         let store = Store::open(dir.path()).unwrap();
         let conn = store.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE kv SET value='99' WHERE key='schema_version'",
-            [],
-        )
-        .unwrap();
+        conn.execute("UPDATE kv SET value='99' WHERE key='schema_version'", [])
+            .unwrap();
     }
     let error = Store::open(dir.path()).unwrap_err();
     assert!(error.to_string().contains("schema is version 99"));

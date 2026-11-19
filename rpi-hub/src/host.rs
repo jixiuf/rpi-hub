@@ -13,17 +13,15 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
+use rpi_hub_core::api::HubStore;
 use rpi_hub_core::config::{self, HubConfig};
 use rpi_hub_core::names;
+use rpi_hub_core::now_ms;
 use rpi_hub_core::paths;
 use rpi_hub_core::protocol::{EnvelopeKind, MAX_TEXT_BYTES};
-use rpi_hub_core::api::HubStore;
 use rpi_hub_core::store::{InstanceRecord, InstanceView};
-use rpi_hub_core::now_ms;
 use rpi_plugin_sdk::callbacks::OwnedString;
-use rpi_plugin_sdk::{
-    PluginApi, RuntimeActionFn, RuntimeActionId, StbString, StbStringRef,
-};
+use rpi_plugin_sdk::{PluginApi, RuntimeActionFn, RuntimeActionId, StbString, StbStringRef};
 
 /// How long an instance is considered alive without a heartbeat.
 pub const ALIVE_MS: i64 = 30_000;
@@ -159,7 +157,8 @@ impl Hub {
             log(&warning);
         }
 
-        let backends = crate::backends::Backends::start(&dir, &config).map_err(|e| e.to_string())?;
+        let backends =
+            crate::backends::Backends::start(&dir, &config).map_err(|e| e.to_string())?;
         let store = Arc::clone(&backends.store);
         let lease_observer = rpi_hub_core::lease::LeaseObserver::new(Arc::clone(&store));
         let host = detect_host();
@@ -201,10 +200,7 @@ impl Hub {
     }
 
     pub fn name(&self) -> String {
-        self.name
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        self.name.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     pub fn set_name(&self, name: impl Into<String>) {
@@ -274,7 +270,8 @@ impl Hub {
         self.shutdown.request();
     }
 
-    pub fn text_limit(&self) -> usize {        MAX_TEXT_BYTES.min(self.config.limits.max_text_bytes.max(1024))
+    pub fn text_limit(&self) -> usize {
+        MAX_TEXT_BYTES.min(self.config.limits.max_text_bytes.max(1024))
     }
 
     pub fn inbox_batch(&self) -> i64 {
@@ -332,7 +329,8 @@ impl Hub {
         if let Some(deliver_as) = deliver_as {
             args["deliverAs"] = serde_json::json!(deliver_as);
         }
-        self.action(RuntimeActionId::SendUserMessage, args).map(|_| ())
+        self.action(RuntimeActionId::SendUserMessage, args)
+            .map(|_| ())
     }
 
     /// Show text in the transcript without running the model.
@@ -366,7 +364,7 @@ impl Hub {
 
     pub fn instances(&self, now: i64) -> Result<Vec<InstanceView>, String> {
         self.store
-            .list_instances(now, ALIVE_MS)
+            .list_instances_alive(now, ALIVE_MS)
             .map_err(|e| e.to_string())
     }
 
@@ -423,14 +421,28 @@ impl Hub {
     /// `owner_epoch` is empty here: the target instance claims the lease with
     /// its own epoch on its next lease tick (same owner_node → resume branch).
     pub fn switch_lease_to(&self, target: &InstanceView) -> Result<String, String> {
-        // Self hand-off is a no-op — and with same-name sibling instances it
-        // is almost always a Tab-completion misclick. Refuse with the
-        // holder-aware hint instead.
+        // Self hand-off: only a no-op when THIS instance really holds the
+        // channel. Otherwise it means "take the channel back for me" — a
+        // perfectly legal request after another instance grabbed the lease —
+        // which the old code refused with a false "already here" message.
+        // Check the store, not the argument.
         if target.node_id == self.node_id {
-            return Ok(format!(
-                "微信接管已在本实例（{}），无需切换",
-                target.label()
-            ));
+            let now = now_ms();
+            let mine = self
+                .lease_observer
+                .holder("wechat")
+                .ok()
+                .flatten()
+                .is_some_and(|h| h.owner_node == self.node_id && h.expires_at > now);
+            if mine {
+                return Ok(format!(
+                    "微信接管已在本实例（{}），无需切换",
+                    target.label()
+                ));
+            }
+            // Fall through: assign to ourselves. Bumps the generation, fences
+            // the remote holder, and this machine's watcher starts the bridge
+            // on the lease-change signal.
         }
         let admin = rpi_hub_core::lease::LeaseAdmin::new(
             Arc::clone(&self.store),
@@ -493,11 +505,17 @@ impl Hub {
         let viewer = rpi_hub_core::render::RenderContext {
             viewer_node_id: &self.node_id,
             wechat_holder_node: holder_node.as_deref(),
-            remote: !matches!(self.config.remote.mode, rpi_hub_core::config::RemoteMode::Local),
+            remote: !matches!(
+                self.config.remote.mode,
+                rpi_hub_core::config::RemoteMode::Local
+            ),
         };
         let holder_triple = holder.map(|h| (h.owner_name, h.generation, h.expires_at));
         Ok(rpi_hub_core::render::render_instances_text(
-            &instances, &viewer, now, holder_triple,
+            &instances,
+            &viewer,
+            now,
+            holder_triple,
         ))
     }
 
@@ -531,6 +549,9 @@ impl Hub {
                 Ok(())
             }
             EnvelopeKind::Notice => self.notice(&envelope.text.unwrap_or_default()),
+            // Assign/unassign are display-only; the hub plugin in the same
+            // process shows the notice via its worker mailbox instead.
+            EnvelopeKind::Assign | EnvelopeKind::Unassign => Ok(()),
         }
     }
 
@@ -617,11 +638,7 @@ impl Hub {
     /// Stop and join the worker (bounded by the caller's timeout).
     pub fn stop_worker(&self) {
         self.request_shutdown();
-        let handle = self
-            .worker
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
+        let handle = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(handle) = handle {
             let _ = handle.join();
         }
@@ -657,7 +674,8 @@ pub fn log(message: &str) {
 }
 
 /// Best-effort hostname without an extra dependency.
-pub fn detect_host() -> String {    for key in ["RPI_HUB_HOST", "HOSTNAME", "HOST", "COMPUTERNAME"] {
+pub fn detect_host() -> String {
+    for key in ["RPI_HUB_HOST", "HOSTNAME", "HOST", "COMPUTERNAME"] {
         if let Ok(value) = std::env::var(key) {
             let value = value.trim();
             if !value.is_empty() {

@@ -20,10 +20,10 @@ pub mod host;
 mod ilink;
 mod media;
 mod outbound;
+mod owner;
 pub mod qr;
 mod state;
 mod wx_commands;
-
 
 pub use error::IlinkError;
 pub use host::{current, Hub};
@@ -68,7 +68,9 @@ rpi_plugin_sdk::export_plugin!(|api| {
         let _ = register_lifecycle(lifecycle_begin, lifecycle_finish, hub.bridge_ptr());
     }
     // Auto-start the bridge when credentials exist, the disabled flag is off,
-    // and the wechat lease is free (claim is inside spawn_bridge).
+    // and the wechat lease is free (claim is inside spawn_bridge). After a
+    // session expiry the credentials are dead: the watcher keeps its foot off
+    // the pedal until the user logs in again.
     let dir = hub.dir.clone();
     if !state::is_disabled(&dir) {
         if let Some(credentials) = state::Credentials::load(&dir) {
@@ -78,11 +80,11 @@ rpi_plugin_sdk::export_plugin!(|api| {
                     "bridge auto-start deferred: {error}; watcher will take over"
                 )),
             }
-            // Watcher: takes over the channel whenever it is unattended
-            // (remote instance died, lease expired) and this process is not
-            // already running a bridge. Skipped while the user has the
-            // bridge disabled.
-            commands::spawn_watcher(&hub, credentials);
+            if !hub.session_expired() {
+                // Watcher: takes over the channel when it is genuinely
+                // unattended (no lease, owner gone, or expired-and-stale).
+                commands::spawn_watcher(&hub, credentials);
+            }
         }
     }
     hub.install();
@@ -94,14 +96,15 @@ extern "C" fn lifecycle_begin(_user_data: *mut std::ffi::c_void) {
         hub.request_shutdown();
     }
 }
-
 extern "C" fn lifecycle_finish(_user_data: *mut std::ffi::c_void) -> i32 {
     if let Some(hub) = host::current() {
-        hub.request_shutdown();
-        hub.abort_renew_task();
+        // Order matters: stop the owner loop (renewals stop; it exits on the
+        // shutdown flag without releasing), then the bridge thread, then
+        // release the lease so the next instance takes over immediately.
+        hub.stop_owner();
         hub.stop_thread();
         // Release the wechat lease on exit: otherwise it lingers for the TTL
-        // (20s) showing a dead instance as the channel owner in /instances,
+        // (60s) showing a dead instance as the channel owner in /instances,
         // and a graceful exit should hand the channel over immediately.
         bridge::release_and_stop(&hub);
         host::clear_current();

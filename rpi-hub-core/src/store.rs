@@ -21,6 +21,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
+use crate::api::HubStore;
 use crate::protocol::{Envelope, MAX_TEXT_BYTES};
 use crate::{names, paths, HubError, Result};
 
@@ -168,6 +169,9 @@ pub struct LeaseHolder {
     pub owner_host: String,
     pub generation: i64,
     pub expires_at: i64,
+    /// Last successful renewal by the owner: the liveness signal that
+    /// distinguishes "expired but actively serving" from "expired and gone".
+    pub updated_at: i64,
 }
 
 impl LeaseHolder {
@@ -287,9 +291,11 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute_batch(SCHEMA)?;
         let found: Option<String> = conn
-            .query_row("SELECT value FROM kv WHERE key='schema_version'", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT value FROM kv WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
             .optional()?;
         match found {
             None => {
@@ -459,6 +465,53 @@ impl Store {
         Ok(out)
     }
 
+    /// Drop presence rows of same-host pids that are demonstrably dead
+    /// (`kill(pid, 0)` fails). C-c/SIGKILL leaves a row that would otherwise
+    /// linger for the full 30s heartbeat window — long enough to keep
+    /// appearing in `/instances` and to gate the dead-owner lease takeover.
+    /// Only same-host rows are checked: cross-machine pids are meaningless
+    /// locally. Cleanup-only; pure reads go through the filtered views.
+    pub fn reap_dead_local_instances(&self) -> Result<usize> {
+        let rows: Vec<(String, String, i64)> = {
+            let conn = self.conn.lock().expect("store mutex poisoned");
+            let mut statement = conn.prepare("SELECT node_id, host, pid FROM instances")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let host = local_host_name();
+        let mut dropped = 0;
+        for (node_id, row_host, pid) in rows {
+            if row_host != host || pid <= 0 {
+                continue;
+            }
+            if !pid_alive(pid.max(0) as u32) {
+                let conn = self.conn.lock().expect("store mutex poisoned");
+                dropped +=
+                    conn.execute("DELETE FROM instances WHERE node_id = ?1", params![node_id])?;
+            }
+        }
+        Ok(dropped)
+    }
+
+    /// Concrete-`Store` convenience forwards to the `HubStore` defaults so
+    /// both plugins (wechat holds `Arc<Store>`, hub holds `Arc<dyn HubStore>`)
+    /// get the identical alive-filtered views.
+    pub fn list_instances_alive(&self, now: i64, alive_ms: i64) -> Result<Vec<InstanceView>> {
+        HubStore::list_instances_alive(self, now, alive_ms)
+    }
+
+    pub fn get_instance_alive(&self, node_id: &str) -> Result<Option<InstanceView>> {
+        HubStore::get_instance_alive(self, node_id)
+    }
+
     pub fn get_instance(&self, node_id: &str) -> Result<Option<InstanceView>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let view = conn
@@ -516,9 +569,7 @@ impl Store {
         now: i64,
         ttl_ms: i64,
     ) -> Result<Claim> {
-        retry_busy(|| {
-            self.claim_lease_once(capability, node_id, node_name, epoch, now, ttl_ms)
-        })
+        retry_busy(|| self.claim_lease_once(capability, node_id, node_name, epoch, now, ttl_ms))
     }
 
     fn claim_lease_once(
@@ -532,9 +583,9 @@ impl Store {
     ) -> Result<Claim> {
         let mut conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<(String, String, String, i64, i64)> = tx
+        let existing: Option<(String, String, String, i64, i64, i64)> = tx
             .query_row(
-                "SELECT owner_node, owner_epoch, owner_name, generation, expires_at
+                "SELECT owner_node, owner_epoch, owner_name, generation, expires_at, updated_at
                  FROM leases WHERE capability = ?1",
                 params![capability],
                 |row| {
@@ -544,6 +595,7 @@ impl Store {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
                     ))
                 },
             )
@@ -563,7 +615,7 @@ impl Store {
                     expires_at,
                 }
             }
-            Some((owner_node, owner_epoch, owner_name, generation, expires_at)) => {
+            Some((owner_node, owner_epoch, owner_name, generation, expires_at, updated_at)) => {
                 let holder_host = tx
                     .query_row(
                         "SELECT host FROM instances WHERE node_id = ?1",
@@ -593,15 +645,7 @@ impl Store {
                         "UPDATE leases SET owner_node = ?2, owner_epoch = ?3, owner_name = ?4,
                                 generation = ?5, expires_at = ?6, updated_at = ?7
                          WHERE capability = ?1",
-                        params![
-                            capability,
-                            node_id,
-                            epoch,
-                            node_name,
-                            generation,
-                            expires_at,
-                            now
-                        ],
+                        params![capability, node_id, epoch, node_name, generation, expires_at, now],
                     )?;
                     Claim::Granted {
                         generation,
@@ -615,6 +659,7 @@ impl Store {
                             owner_host: holder_host,
                             generation,
                             expires_at,
+                            updated_at,
                         },
                     }
                 }
@@ -640,14 +685,7 @@ impl Store {
         let changed = conn.execute(
             "UPDATE leases SET expires_at = ?5, updated_at = ?6
              WHERE capability = ?1 AND owner_node = ?2 AND owner_epoch = ?3 AND generation = ?4",
-            params![
-                capability,
-                node_id,
-                epoch,
-                generation,
-                now + ttl_ms,
-                now
-            ],
+            params![capability, node_id, epoch, generation, now + ttl_ms, now],
         )?;
         Ok(changed == 1)
     }
@@ -743,14 +781,7 @@ impl Store {
         ttl_ms: i64,
     ) -> Result<i64> {
         retry_busy(|| {
-            self.assign_lease_once(
-                capability,
-                to_node,
-                to_name,
-                owner_epoch,
-                now,
-                ttl_ms,
-            )
+            self.assign_lease_once(capability, to_node, to_name, owner_epoch, now, ttl_ms)
         })
     }
 
@@ -793,9 +824,11 @@ impl Store {
     /// so a hand-off mid-poll never replays or splits messages).
     pub fn get_cursor(&self) -> Option<String> {
         let conn = self.conn.lock().expect("store mutex poisoned");
-        conn.query_row("SELECT value FROM kv WHERE key='wechat_cursor'", [], |row| {
-            row.get(0)
-        })
+        conn.query_row(
+            "SELECT value FROM kv WHERE key='wechat_cursor'",
+            [],
+            |row| row.get(0),
+        )
         .optional()
         .ok()
         .flatten()
@@ -836,7 +869,7 @@ impl Store {
         let holder = conn
             .query_row(
                 "SELECT l.owner_node, l.owner_name,
-                        COALESCE(i.host, ''), l.generation, l.expires_at
+                        COALESCE(i.host, ''), l.generation, l.expires_at, l.updated_at
                    FROM leases l
                    LEFT JOIN instances i ON i.node_id = l.owner_node
                   WHERE l.capability = ?1",
@@ -848,6 +881,7 @@ impl Store {
                         owner_host: row.get(2)?,
                         generation: row.get(3)?,
                         expires_at: row.get(4)?,
+                        updated_at: row.get(5)?,
                     })
                 },
             )
@@ -859,7 +893,7 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut statement = conn.prepare(
             "SELECT l.capability, l.owner_node, l.owner_name,
-                    COALESCE(i.host, ''), l.generation, l.expires_at
+                    COALESCE(i.host, ''), l.generation, l.expires_at, l.updated_at
                FROM leases l
                LEFT JOIN instances i ON i.node_id = l.owner_node
               ORDER BY l.capability",
@@ -873,6 +907,7 @@ impl Store {
                     owner_host: row.get(3)?,
                     generation: row.get(4)?,
                     expires_at: row.get(5)?,
+                    updated_at: row.get(6)?,
                 },
             ))
         })?;
@@ -1000,7 +1035,8 @@ impl Store {
 
     pub fn stats(&self, now: i64) -> Result<Stats> {
         let conn = self.conn.lock().expect("store mutex poisoned");
-        let instances: i64 = conn.query_row("SELECT COUNT(*) FROM instances", [], |row| row.get(0))?;
+        let instances: i64 =
+            conn.query_row("SELECT COUNT(*) FROM instances", [], |row| row.get(0))?;
         let envelopes_pending: i64 = conn.query_row(
             "SELECT COUNT(*) FROM envelopes WHERE acked_at IS NULL AND expires_at > ?1",
             params![now],
@@ -1040,6 +1076,50 @@ fn retry_busy<T>(mut op: impl FnMut() -> Result<T>) -> Result<T> {
     Err(last.unwrap_or_else(|| HubError::invalid("database stayed locked")))
 }
 
+/// Best-effort hostname without an extra dependency. Also used by the
+/// dead-pid reaper to scope `kill(pid, 0)` probes to this machine.
+pub fn local_host_name() -> String {
+    for key in ["RPI_HUB_HOST", "HOSTNAME", "HOST", "COMPUTERNAME"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    if let Ok(value) = std::fs::read_to_string("/etc/hostname") {
+        let value = value.trim();
+        if !value.is_empty() {
+            return value.to_string();
+        }
+    }
+    if let Ok(output) = std::process::Command::new("hostname").output() {
+        if output.status.success() {
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !value.is_empty() {
+                return value;
+            }
+        }
+    }
+    "localhost".to_string()
+}
+
+/// `kill(pid, 0)`-style liveness probe: false when the pid demonstrably does
+/// not exist. EPERM (exists, no permission to signal) counts as alive.
+#[cfg(unix)]
+pub fn pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return true;
+    }
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+pub fn pid_alive(_pid: u32) -> bool {
+    true
+}
+
 fn is_lock_contention(error: &HubError) -> bool {
     matches!(
         error,
@@ -1049,6 +1129,22 @@ fn is_lock_contention(error: &HubError) -> bool {
                 rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
             )
     )
+}
+
+#[cfg(all(test, unix))]
+mod pid_tests {
+    use super::*;
+
+    #[test]
+    fn pid_alive_tells_live_and_dead_pids_apart() {
+        assert!(pid_alive(std::process::id()));
+        // Pid 4M is practically certain to be free; on a busy shared machine
+        // it could exist — skip rather than flake.
+        if pid_alive(4_000_000) {
+            return;
+        }
+        assert!(!pid_alive(4_000_000));
+    }
 }
 
 #[cfg(test)]

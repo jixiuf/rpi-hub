@@ -17,6 +17,9 @@ pub enum IlinkError {
     Protocol(String),
     /// Filesystem error (media persistence).
     Io(String),
+    /// A long poll was aborted on purpose (lease lost mid-poll): not a
+    /// failure, the caller just stops; the new owner re-polls the batch.
+    Cancelled,
 }
 
 impl fmt::Display for IlinkError {
@@ -31,6 +34,7 @@ impl fmt::Display for IlinkError {
             } => write!(f, "{label} HTTP {status} code={code:?}: {message}"),
             IlinkError::Protocol(m) => write!(f, "protocol: {m}"),
             IlinkError::Io(m) => write!(f, "io: {m}"),
+            IlinkError::Cancelled => write!(f, "cancelled"),
         }
     }
 }

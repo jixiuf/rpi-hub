@@ -14,7 +14,6 @@ use rpi_plugin_sdk::RuntimeActionId;
 
 use crate::host::{self, Hub, ALIVE_MS};
 use crate::intent;
-
 const HEARTBEAT: Duration = Duration::from_secs(3);
 const DISPATCH: Duration = Duration::from_millis(300);
 const CONTEXT: Duration = Duration::from_secs(15);
@@ -169,6 +168,8 @@ fn dispatch(hub: &Arc<Hub>) {
                 let text = envelope.text.clone().unwrap_or_default();
                 let _ = hub.notice(&format!("{}: {text}", envelope.from_name));
             }
+            EnvelopeKind::Assign => handle_assign(hub, &envelope, true),
+            EnvelopeKind::Unassign => handle_assign(hub, &envelope, false),
         }
         if let Err(error) = hub.store.ack_envelope(&envelope.id, &hub.node_id, now_ms()) {
             host::log(&format!("ack failed: {error}"));
@@ -221,6 +222,31 @@ fn handle_command(hub: &Arc<Hub>, envelope: &Envelope) {
     }
 }
 
+/// `assign`/`unassign` envelopes from the LeaseAdmin path (`/use`, phone
+/// `/use N`, hub_switch): display the hand-off as a transcript notice.
+/// (No cross-plugin wake-up here: the two dylibs static-link their own copy
+/// of any process-global, so a signal from this crate would never reach the
+/// wechat plugin's threads. The OwnerLoop/watcher poll the lease row every
+/// 200ms instead — sub-second, simple, honest.)
+fn handle_assign(hub: &Arc<Hub>, envelope: &Envelope, assigned: bool) {
+    // The envelope text already carries the user-facing sentence ("wechat
+    // 已交给你…" / "…已移交 <新持有者>…"); show it verbatim instead of
+    // recomposing from fields (the old code displayed the SENDER —
+    // "lease-admin" — as the new holder).
+    let text = envelope.text.clone().unwrap_or_default();
+    let text = if text.is_empty() {
+        let capability = envelope.capability.clone().unwrap_or_default();
+        if assigned {
+            format!("✅ {capability} 接管已交给本实例")
+        } else {
+            format!("↗️ {capability} 已移交新持有者")
+        }
+    } else {
+        text
+    };
+    let _ = hub.notice(&text);
+}
+
 fn handle_reply(hub: &Arc<Hub>, envelope: &Envelope) {
     let Some(correlation) = envelope.correlation.clone() else {
         return;
@@ -265,6 +291,13 @@ fn reply(hub: &Arc<Hub>, envelope: &Envelope, ok: bool, text: String) {
 }
 
 fn housekeeping(hub: &Arc<Hub>) {
+    // Same-host dead pids go first: a C-c'd process must stop gating the
+    // dead-owner lease takeover for the rest of the heartbeat window.
+    if let Ok(dropped) = hub.store.reap_dead_local_instances() {
+        if dropped > 0 {
+            host::log(&format!("reaped {dropped} dead local presence rows"));
+        }
+    }
     match hub.store.prune(now_ms(), ALIVE_MS) {
         Ok(report) => {
             if report.instances + report.envelopes + report.seen > 0 {

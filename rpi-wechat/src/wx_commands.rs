@@ -88,7 +88,7 @@ pub fn parse(text: &str) -> Option<WxCommand> {
 pub fn instances_text(hub: &Arc<Hub>, now: i64) -> Result<String, String> {
     let instances = hub
         .store
-        .list_instances(now, crate::host::ALIVE_MS)
+        .list_instances_alive(now, crate::host::ALIVE_MS)
         .map_err(|e| e.to_string())?;
     let holder = hub
         .lease_owner
@@ -105,7 +105,12 @@ pub fn instances_text(hub: &Arc<Hub>, now: i64) -> Result<String, String> {
         ),
     };
     let holder_triple = holder.map(|h| (h.full_name(), h.generation, h.expires_at));
-    Ok(render_instances_text(&instances, &viewer, now, holder_triple))
+    Ok(render_instances_text(
+        &instances,
+        &viewer,
+        now,
+        holder_triple,
+    ))
 }
 
 /// Wait bound for the target's `/status` reply after a cross-instance hand-off.
@@ -122,12 +127,30 @@ pub fn use_command(hub: &Arc<Hub>, arg: &str) -> Result<String, String> {
     let now = rpi_hub_core::now_ms();
     let instances = hub
         .store
-        .list_instances(now, crate::host::ALIVE_MS)
+        .list_instances_alive(now, crate::host::ALIVE_MS)
         .map_err(|e| e.to_string())?;
     if instances.is_empty() {
         return Err("没有登记的实例".to_string());
     }
     let target = resolve_by_list(&instances, arg)?;
+    // Self-target with a healthy lease of our own: nothing to do. Otherwise
+    // fall through and assign — "/use self" is how the operator takes the
+    // channel back when another instance holds it.
+    if target.node_id == hub.node_id {
+        let mine = hub
+            .lease_owner
+            .holder("wechat")
+            .ok()
+            .flatten()
+            .is_some_and(|h| h.owner_node == hub.node_id && h.expires_at > now);
+        if mine {
+            return Ok(format!(
+                "微信接管已在本实例（{}），无需切换\n\n{}",
+                target.label(),
+                status_text(hub, now)
+            ));
+        }
+    }
     let admin = LeaseAdmin::new(
         Arc::clone(&hub.store) as Arc<dyn HubStore>,
         hub.config.lease.ttl_ms(),
@@ -152,7 +175,11 @@ pub fn use_command(hub: &Arc<Hub>, arg: &str) -> Result<String, String> {
 /// Ask a REMOTE instance for its status: a correlated `cmd status` envelope;
 /// the target's worker executes its intent and replies. Polls this node's
 /// inbox for the correlated reply and acks it. `None` on timeout.
-fn remote_status(hub: &Arc<Hub>, target: &rpi_hub_core::store::InstanceView, now: i64) -> Option<String> {
+fn remote_status(
+    hub: &Arc<Hub>,
+    target: &rpi_hub_core::store::InstanceView,
+    now: i64,
+) -> Option<String> {
     let correlation = rpi_hub_core::protocol::new_id();
     let intent = rpi_hub_core::protocol::CommandIntent::new("status");
     let envelope = rpi_hub_core::protocol::Envelope::command(
@@ -216,9 +243,7 @@ fn resolve_by_list(
         .collect();
     match matches.len() {
         1 => Ok(matches[0].clone()),
-        0 => Err(format!(
-            "没有匹配 {query:?} 的实例；当前列表见 /instances"
-        )),
+        0 => Err(format!("没有匹配 {query:?} 的实例；当前列表见 /instances")),
         _ => Err(format!(
             "{query:?} 匹配到 {} 个实例，请用完整名 name@host 或编号",
             matches.len()
@@ -234,15 +259,12 @@ pub fn status_text(hub: &Arc<Hub>, now: i64) -> String {
     // data /instances shows, without spending a model turn.
     let instance = hub.store.get_instance(&hub.node_id).ok().flatten();
     let holder = hub.lease_owner.holder("wechat").ok().flatten();
-    let mine = holder
-        .as_ref()
-        .is_some_and(|h| h.owner_node == hub.node_id);
+    let mine = holder.as_ref().is_some_and(|h| h.owner_node == hub.node_id);
     let mut lines = vec![format!("实例: {}", hub.label())];
     if let Some(model) = instance.as_ref().and_then(|i| i.model.as_deref()) {
         lines.push(format!("模型: {model}"));
     }
-    if let Some(session) = instance.as_ref().and_then(|i| i.session_id.as_deref())
-    {
+    if let Some(session) = instance.as_ref().and_then(|i| i.session_id.as_deref()) {
         let short: String = session.chars().take(8).collect();
         lines.push(format!("会话: {short}…"));
     }
@@ -252,7 +274,11 @@ pub fn status_text(hub: &Arc<Hub>, now: i64) -> String {
         }
         lines.push(format!(
             "状态: {}",
-            if view.busy { "忙（生成中）" } else { "空闲" }
+            if view.busy {
+                "忙（生成中）"
+            } else {
+                "空闲"
+            }
         ));
         // Session age is the cheap task identifier until a session-title
         // action exists in the host ABI (see roadmap).
@@ -263,10 +289,7 @@ pub fn status_text(hub: &Arc<Hub>, now: i64) -> String {
             format!("{up_minutes}m")
         };
         lines.push(format!("启动: {age}前"));
-        lines.push(format!(
-            "心跳: {}s 前",
-            (now - view.last_seen) / 1000
-        ));
+        lines.push(format!("心跳: {}s 前", (now - view.last_seen) / 1000));
     }
     match holder {
         Some(h) if mine => lines.push(format!("微信: 本实例持有（generation {}）", h.generation)),
@@ -358,7 +381,10 @@ mod tests {
     #[test]
     fn parse_matches_the_exact_whitelist() {
         assert!(matches!(parse("/instances"), Some(WxCommand::Instances)));
-        assert!(matches!(parse("  /instances  "), Some(WxCommand::Instances)));
+        assert!(matches!(
+            parse("  /instances  "),
+            Some(WxCommand::Instances)
+        ));
         assert!(matches!(parse("/use"), Some(WxCommand::Use(None))));
         assert!(matches!(parse("/new"), Some(WxCommand::New)));
         assert!(matches!(parse("/status"), Some(WxCommand::Status)));
@@ -425,5 +451,4 @@ mod tests {
         assert!(resolve_by_list(&with_dup, "gamm").is_err());
         assert!(resolve_by_list(&with_dup, "nope").is_err());
     }
-
 }

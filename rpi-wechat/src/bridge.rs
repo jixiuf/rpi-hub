@@ -2,7 +2,8 @@
 //! instance holds the `wechat` lease.
 //!
 //! Loop (per tick, all on this thread):
-//! 1. `check_lease` + renew — not the owner (or expired) ⇒ stop immediately.
+//! 1. liveness gate — the OwnerLoop (owner.rs) holds the lease and renews
+//!    it on its own clock; when it drops the flag, stop immediately.
 //! 2. `getupdates` long poll (cursor + `seen` dedupe in the hub store).
 //! 3. Authorized inbound routing (mirrors the reference implementation):
 //!    - text ⇒ notice + inject (with accumulated files/images batch)
@@ -10,22 +11,21 @@
 //!    - file ⇒ download, save, ack, accumulate (never auto-injected)
 //! 4. Outbound queue: replies pushed by the event thread are chunked + sent.
 //!
-//! Failure modes: session expiry (`errcode -14`) stops the bridge and asks for
-//! `/wechat login`; transport errors back off; stale context_token (-2)
-//! requeues undelivered replies until the next inbound message refreshes it.
+//! Failure modes: session expiry (`errcode -14`) stops the bridge and asks
+//! for `/wechat login` (the OwnerLoop then releases the lease); transport
+//! errors back off; stale context_token (-2) requeues undelivered replies
+//! until the next inbound message refreshes it.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rpi_hub_core::now_ms;
-
 use crate::error::IlinkError;
 use crate::host;
 use crate::host::Hub;
-use crate::ilink::{self, FilePayload, ImagePayload, IlinkClient};
-
+use crate::ilink::{self, FilePayload, IlinkClient, ImagePayload, UpdatesPage};
+use crate::owner::FACT_POLL;
 /// Backoff after a transport error.
 const TRANSPORT_BACKOFF: Duration = Duration::from_secs(5);
 /// Outbound chunk size: WeChat text messages past ~2k chars truncate
@@ -191,12 +191,7 @@ pub struct BatchState {
 // ---- per-kind inbound handlers (PR-3b): one async fn per message kind ----
 
 /// Text flushes whatever accumulated with it (images/files) as one injection.
-async fn handle_text(
-    hub: Arc<Hub>,
-    ctx: &BridgeContext,
-    text: String,
-    batch: &mut BatchState,
-) {
+async fn handle_text(hub: Arc<Hub>, ctx: &BridgeContext, text: String, batch: &mut BatchState) {
     drain_inbound(
         hub,
         ctx,
@@ -373,37 +368,18 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
     let mut typing_ticket: Option<String> = None;
     let mut pending_chunks: Vec<String> = Vec::new();
     let mut batch = BatchState::default();
+    // The mid-poll lease re-check is gone: the owner loop renews on its own
+    // clock, so a 40s getupdates can no longer outlive the lease. The bridge
+    // simply stops the moment the owner loop drops the liveness flag.
+    let mut lease_alive = hub.lease_alive();
 
     loop {
         if hub.shutdown.requested() {
-            hub.abort_renew_task();
             return StopReason::Shutdown;
         }
-
-        // ---- lease gate + renewal ----
-        let now = now_ms();
-        let ttl = hub.config.lease.ttl_ms();
-        let held = {
-            let mut lease_slot = hub.lease.lock().unwrap_or_else(|p| p.into_inner());
-            let Some(lease) = lease_slot.as_mut() else {
-                return StopReason::LeaseLost;
-            };
-            let renewed = hub
-                .lease_owner
-                .renew("wechat", lease.generation, now)
-                .unwrap_or(false);
-            if renewed {
-                lease.expires_at = now + ttl;
-                true
-            } else {
-                false
-            }
-        };
-        if !held {
-            hub.record_error("wechat: lease lost (fenced or expired)");
+        if !lease_alive {
             return StopReason::LeaseLost;
         }
-        hub.set_status(&rpi_hub_core::status::status_local(&hub.label()));
 
         // ---- pending (stale-token) chunks first ----
         if !pending_chunks.is_empty() && context_token.is_some() {
@@ -422,8 +398,12 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
             pending_chunks = undelivered;
         }
 
-        // ---- inbound: one long poll ----
-        match ctx.client.get_updates(&cursor).await {
+        // ---- inbound: one abortable long poll ----
+        // A mid-poll lease loss (a /use hand-off) aborts the HTTP request
+        // immediately: the old owner exits at once and the cursor stays
+        // put, so the new owner re-polls the same batch from the shared
+        // cursor.
+        match abortable_get_updates(&hub, &ctx.client, &cursor).await {
             Ok(page) => {
                 cursor = page.cursor;
                 hub.store.set_cursor(&cursor);
@@ -439,95 +419,20 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
                         context_token = Some(incoming.context_token.clone());
                         hub.set_context_token(Some(&incoming.context_token));
                     }
-                    // Re-check the lease BEFORE injecting: a /use hand-off may
-                    // have moved the lease while this poll was in flight (the
-                    // long poll cannot be interrupted mid-flight). Without
-                    // this the old instance would inject a message that
-                    // belongs to the new owner.
-                    let still_owner = {
-                        let generation = hub
-                            .lease
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .as_ref()
-                            .map(|l| l.generation)
-                            .unwrap_or(0);
-                        hub.lease_owner.check("wechat", generation, now_ms())
-                    };
-                    if !still_owner {
-                        host::log("lease lost mid-poll; dropping message for the new owner");
-                        return StopReason::LeaseLost;
-                    }
-                    match incoming.kind.as_str() {
-                        "text" => {
-                            // Phone commands first (exact whitelist): they
-                            // reply directly over WeChat and never touch the
-                            // agent lane or the accumulation batch.
-                            if let Some(command) = crate::wx_commands::parse(&incoming.text) {
-                                let reply = match crate::wx_commands::execute(&hub, command) {
-                                    Ok(text) => text,
-                                    Err(error) => format!("❌ {error}"),
-                                };
-                                let _ = ctx
-                                    .client
-                                    .send_text(
-                                        &ctx.user_id,
-                                        &reply,
-                                        context_token.as_deref(),
-                                    )
-                                    .await;
-                                continue;
-                            }
-                            handle_text(Arc::clone(&hub), &ctx, incoming.text.clone(), &mut batch)
-                                .await;
-                        }
-                        "image" => {
-                            let Some(payload) = incoming.image.clone() else {
-                                continue;
-                            };
-                            handle_image(
-                                Arc::clone(&hub),
-                                &ctx,
-                                payload,
-                                context_token.as_deref(),
-                                &mut batch,
-                            )
-                            .await;
-                        }
-                        "file" => {
-                            let Some(payload) = incoming.file.clone() else {
-                                continue;
-                            };
-                            handle_file(
-                                Arc::clone(&hub),
-                                &ctx,
-                                payload,
-                                context_token.as_deref(),
-                                &mut batch,
-                            )
-                            .await;
-                        }
-                        "voice" => {
-                            handle_voice(
-                                Arc::clone(&hub),
-                                &ctx,
-                                incoming.voice.clone(),
-                                context_token.as_deref(),
-                                &mut batch,
-                            )
-                            .await;
-                        }
-                        "video" => {
-                            handle_video(Arc::clone(&hub), &ctx, context_token.as_deref()).await;
-                        }
-                        _ => {}
-                    }
+                    deliver(&hub, &ctx, incoming, context_token.as_deref(), &mut batch).await;
                 }
+            }
+            Err(IlinkError::Cancelled) => {
+                host::log("poll aborted: lease lost mid-poll; new owner re-polls the batch");
+                return StopReason::LeaseLost;
             }
             Err(error) => {
                 if error.is_session_expired() {
-                    hub.abort_renew_task();
                     hub.record_error("wechat: session expired; run /wechat login");
+                    // The owner loop must release the lease for us — otherwise
+                    // it would keep renewing for a bridge that can never poll
+                    // or send again ("actively holding while dead").
+                    hub.set_bridge_stop(StopReason::SessionExpired);
                     return StopReason::SessionExpired;
                 }
                 hub.record_error(format!("wechat: getupdates failed: {error}"));
@@ -567,9 +472,12 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
                 .await;
             // Degraded, not stopped: the lease is still ours and the bridge
             // runs, but replies cannot go out until the user's next inbound
-            // message refreshes the context token. 🟡 keeps the holder color
-            // vocabulary (yellow = degraded) without a second glyph.
-            hub.set_status(&rpi_hub_core::status::status_degraded(&hub.label()));
+            // message refreshes the context token. The OwnerLoop composes
+            // the footer from this flag (💭 keeps the degraded shape).
+            hub.set_degraded(true);
+        } else if sent_count > 0 {
+            // A successful send proves the token works again.
+            hub.set_degraded(false);
         }
         if sent_count > 0 {
             host::log(&format!("outbound drained {} chunks", sent_count));
@@ -588,6 +496,53 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
         }
 
         tokio_time(Duration::from_millis(300)).await;
+        lease_alive = hub.lease_alive();
+    }
+}
+
+/// Route one authorized inbound message (extracted from the poll loop so
+/// the abortable-poll code stays readable).
+async fn deliver(
+    hub: &Arc<Hub>,
+    ctx: &BridgeContext,
+    incoming: crate::ilink::Incoming,
+    context_token: Option<&str>,
+    batch: &mut BatchState,
+) {
+    match incoming.kind.as_str() {
+        "text" => {
+            // Phone commands first (exact whitelist): they reply directly
+            // over WeChat and never touch the agent lane or the batch.
+            if let Some(command) = crate::wx_commands::parse(&incoming.text) {
+                let reply = match crate::wx_commands::execute(hub, command) {
+                    Ok(text) => text,
+                    Err(error) => format!("❌ {error}"),
+                };
+                let _ = ctx
+                    .client
+                    .send_text(&ctx.user_id, &reply, context_token)
+                    .await;
+                return;
+            }
+            handle_text(Arc::clone(hub), ctx, incoming.text, batch).await;
+        }
+        "image" => {
+            if let Some(payload) = incoming.image {
+                handle_image(Arc::clone(hub), ctx, payload, context_token, batch).await;
+            }
+        }
+        "file" => {
+            if let Some(payload) = incoming.file {
+                handle_file(Arc::clone(hub), ctx, payload, context_token, batch).await;
+            }
+        }
+        "voice" => {
+            handle_voice(Arc::clone(hub), ctx, incoming.voice, context_token, batch).await;
+        }
+        "video" => {
+            handle_video(Arc::clone(hub), ctx, context_token).await;
+        }
+        _ => {}
     }
 }
 
@@ -597,10 +552,44 @@ async fn tokio_time(duration: Duration) {
     std::thread::sleep(duration);
 }
 
+/// One abortable `getupdates` long poll. The server holds the request up to
+/// 40s; `lease_alive` can drop mid-poll (a `/use` hand-off), and the old
+/// owner must stop IMMEDIATELY — not after the remaining poll time. The
+/// watchdog is a real tokio sleep (registered waker, 200ms) — a bare
+/// `poll_fn` without waker registration would only ever be polled as a
+/// side effect of the HTTP future's IO events, with no timing guarantee.
+/// Returns `Err(IlinkError::Cancelled)` when the lease died while waiting.
+async fn abortable_get_updates(
+    hub: &Arc<Hub>,
+    client: &IlinkClient,
+    cursor: &str,
+) -> Result<UpdatesPage, IlinkError> {
+    let request = client.get_updates(cursor);
+    tokio::pin!(request);
+    loop {
+        tokio::select! {
+            page = &mut request => return page,
+            _ = tokio::time::sleep(FACT_POLL) => {
+                if !hub.lease_alive() || hub.shutdown.requested() {
+                    // The request future is dropped here: the HTTP call is
+                    // aborted mid-flight. The cursor was NOT advanced, so
+                    // the new owner re-polls from the shared cursor and
+                    // receives this batch — no lost or misrouted messages.
+                    return Err(IlinkError::Cancelled);
+                }
+                // Still alive: loop around and wait another slice.
+            }
+        }
+    }
+}
+
 /// Store-level lease hand-off used by `/wechat stop`: release and stop.
+/// The lease facade carries release; this is the only bridge-adjacent
+/// release path and it runs outside the OwnerLoop (user request).
 pub fn release_and_stop(hub: &Arc<Hub>) {
     if let Some(lease) = hub.lease.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
         let _ = hub.lease_owner.release("wechat", lease.generation);
     }
+    hub.set_lease_alive(false);
     hub.request_shutdown();
 }

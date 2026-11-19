@@ -83,12 +83,34 @@ UPDATE leases SET owner_node=?, owner_epoch=?, owner_name=?,
 
 规则：
 
-- TTL 20s，5s 续租；本地 owner 每次出站前 `check_lease`（缓存 ≤2s），失败就停桥。
-- `/use <target>` = `assign_lease(target)`：generation+1，旧 owner 下次续约失败 → 停止收发。
-  目标实例的 worker 用同一 `node_id` 认领时走"reload 续租"分支，generation 不变。
-- `/wechat stop` = `release_lease`，并把"用户显式停用"持久化，避免心跳又抢回来。
-- 进程暂停超过 TTL 后恢复：若无人抢，`renew` 允许续上（没有分裂）；若被抢，generation 已变 →
-  续约/检查都失败。
+- **单一写者（OwnerLoop）**：wechat 插件内一个独立线程持有租约生命周期——
+  5s `renew`；失败后先 `claim` 一次（机器暂停 > TTL 后恢复、无人抢走的续上场景）；
+  claim 返回 `Held` 才退出并通知桥。桥循环不再触碰租约：它只读 `lease_alive`
+  标志，OwnerLoop 清除即停。根因教训：续约曾写在桥循环顶部，而循环主体是 40s
+  `getupdates` 长轮询，TTL 20s 必在轮询中过期 → 全网 watcher 抢占振荡。
+- TTL 默认 60s（`MIN_TTL_SECONDS=45`：必须 > getupdates 40s 长轮询 + 余量），
+  `LeaseConfig::validate()` 在加载时校验 renew ≤ ttl/4 与 TTL 下限，仅告警不拒载。
+- 本地 owner 出站前不再逐次 `check_lease`（OwnerLoop 的 5s 节拍即门控；桥
+  停止即出站停止）。
+- `/use <target>` = `assign_lease(target)` + **assign/unassign 信封**：generation+1
+  fence 旧 owner，同时向目标投 `assign`、向旧 owner 投 `unassign`（best effort，
+  丢了只是慢一个 tick），并 publish 进程内租约变更信号（Condvar）——本机的
+  OwnerLoop/watcher 亚秒级重读租约行，footer 即时跟手。旧 owner 下次续约失败
+  → 停止收发；目标 watcher 收到信号立即起桥 resume 租约（同 node_id →
+  generation 不变）。
+- `/wechat stop` = `release_lease` + 持久化"用户显式停用"；会话过期（errcode -14）
+  时 OwnerLoop 释放租约并置 `session_expired` 门闩，watcher 不再自动重启死会话。
+- **watcher 语义（防振荡）**：绝不抢未过期且 owner 健在的租约；只在「无租约行 /
+  过期且 `updated_at` 超 30s 无续约 / owner 的 presence 行已消失」三种情况接管。
+  `updated_at`（最近一次成功续约时间）是区分"过期但活跃续约"与"过期且已死"的事实依据。
+- **死进程 reap**：presence 行带 pid；同 host 的行用 `kill(pid, 0)` 探活，死行
+  立即清除（`list_instances_alive`/`get_instance_alive`/worker 慢 tick），不再等
+  30s 心跳窗口——C-c/SIGKILL 的实例立刻从 `/instances` 消失，也不阻塞 dead-owner
+  租约接管。
+- 进程暂停超过 TTL 后恢复：若无人抢，OwnerLoop 的 renew→claim 分支续上（没有分裂）；
+  若被抢，generation 已变 → 续约/检查都失败，OwnerLoop 退出。
+- footer（`SetStatus{key:"wechat"}`）只有两个写者：OwnerLoop（持有中：💬/💭）与
+  watcher（非持有：🗨️/📴），全部从 store 事实渲染，不再有进程私有视图。
 
 ## 5. worker
 

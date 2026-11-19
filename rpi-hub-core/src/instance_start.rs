@@ -31,9 +31,9 @@ const STARTUP_WAIT: Duration = Duration::from_secs(10);
 fn is_safe_cwd(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 1024
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~' | ' ' | '+' | '='))
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~' | ' ' | '+' | '=')
+        })
 }
 
 /// Base name for the tmux session: the cwd's last component, stripped to
@@ -268,7 +268,7 @@ pub fn start(ctx: &SpawnContext<'_>, cwd_arg: Option<&str>) -> Result<String, St
 pub fn stop(ctx: &SpawnContext<'_>, query: &str, now: i64) -> Result<String, String> {
     let instances = ctx
         .store
-        .list_instances(now, 30_000)
+        .list_instances_alive(now, 30_000)
         .map_err(|e| e.to_string())?;
     let target = resolve_by_list(&instances, query)?;
     if target.node_id == ctx.node_id {
@@ -281,16 +281,17 @@ pub fn stop(ctx: &SpawnContext<'_>, query: &str, now: i64) -> Result<String, Str
             target.host
         ));
     }
-    let (session, window) = tmux_target_for(
-        &ctx.spawn.tmux_command,
-        &ctx.spawn.session_prefix,
-        &target,
-    )?;
+    let (session, window) =
+        tmux_target_for(&ctx.spawn.tmux_command, &ctx.spawn.session_prefix, &target)?;
     let target_spec = match &window {
         Some(window) => format!("{session}:{window}"),
         None => session.clone(),
     };
-    let action = if window.is_some() { "kill-window" } else { "kill-session" };
+    let action = if window.is_some() {
+        "kill-window"
+    } else {
+        "kill-session"
+    };
     let status = Command::new(&ctx.spawn.tmux_command)
         .args([action, "-t", &target_spec])
         .status()
@@ -310,7 +311,12 @@ fn tmux_target_for(
     target: &InstanceView,
 ) -> Result<(String, Option<String>), String> {
     let output = Command::new(tmux)
-        .args(["list-windows", "-a", "-F", "#{session_name}\t#{window_name}\t#{pane_current_path}"])
+        .args([
+            "list-windows",
+            "-a",
+            "-F",
+            "#{session_name}\t#{window_name}\t#{pane_current_path}",
+        ])
         .output()
         .map_err(|error| format!("cannot run {tmux}: {error}"))?;
     let text = String::from_utf8_lossy(&output.stdout);
@@ -320,8 +326,7 @@ fn tmux_target_for(
         else {
             continue;
         };
-        let is_ours = session.starts_with(&format!("{prefix}-"))
-            || window == names_from(target);
+        let is_ours = session.starts_with(&format!("{prefix}-")) || window == names_from(target);
         if is_ours && Path::new(path) == Path::new(&target.cwd) {
             return Ok((session.to_string(), Some(window.to_string())));
         }
@@ -361,7 +366,7 @@ fn rows(ctx: &SpawnContext<'_>) -> Result<Vec<String>, String> {
     let now = now_ms();
     let instances = ctx
         .store
-        .list_instances(now, 30_000)
+        .list_instances_alive(now, 30_000)
         .map_err(|e| e.to_string())?;
     Ok(instances.into_iter().map(|i| i.node_id).collect())
 }
@@ -377,10 +382,7 @@ fn added_rows(before: &[String], after: &[String]) -> Option<Vec<String>> {
 }
 
 /// Number first (`/use 3` → the 3rd row), then name/label/unique-prefix.
-pub fn resolve_by_list(
-    instances: &[InstanceView],
-    query: &str,
-) -> Result<InstanceView, String> {
+pub fn resolve_by_list(instances: &[InstanceView], query: &str) -> Result<InstanceView, String> {
     if let Ok(number) = query.parse::<usize>() {
         if number == 0 {
             return Err("编号从 1 开始（见 /instances）".to_string());
@@ -393,7 +395,10 @@ pub fn resolve_by_list(
         });
     }
     let query = query.trim();
-    if let Some(found) = instances.iter().find(|i| i.label() == query || i.name == query) {
+    if let Some(found) = instances
+        .iter()
+        .find(|i| i.label() == query || i.name == query)
+    {
         return Ok(found.clone());
     }
     let matches: Vec<&InstanceView> = instances
@@ -433,7 +438,10 @@ mod tests {
 
     #[test]
     fn session_base_sanitizes_and_falls_back() {
-        assert_eq!(session_base(Path::new("/Users/me/repos/pi-rust")), "pi-rust");
+        assert_eq!(
+            session_base(Path::new("/Users/me/repos/pi-rust")),
+            "pi-rust"
+        );
         assert_eq!(session_base(Path::new("/tmp/")), "tmp");
         assert_eq!(session_base(Path::new("/")), "instance");
         assert_eq!(session_base(Path::new("/work/我的 项目")), "instance");

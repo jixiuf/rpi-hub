@@ -62,14 +62,23 @@ pub fn spawn_bridge_public(hub: &Arc<Hub>, credentials: &Credentials) -> Result<
 
 /// Spawn the bridge thread with a fresh client and channel.
 fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String> {
+    // Sync the store-resolved display name BEFORE the claim: the store may
+    // have renamed us at registration (`-<pid>` suffix on name collision),
+    // and the claim/resume writes carry `node_name` — without this the lease
+    // row's owner_name is overwritten with the RAW config name (the same
+    // base name as the colliding instance), corrupting every holder display.
+    if let Some(view) = hub.store.get_instance_alive(&hub.node_id).ok().flatten() {
+        hub.lease_owner.set_node_name(&view.name);
+        hub.set_name(&view.name);
+    }
     // Lease: claim (auto) — a held lease from another instance is an error.
     match hub.claim_wechat().map_err(|e| e.to_string())? {
         rpi_hub_core::store::Claim::Granted { .. } => {}
         rpi_hub_core::store::Claim::Held { holder } => {
             // Another instance answers WeChat right now. The STATUS line must
-            // say so (○ + holder) — the user's TUI has no other source for
+            // say so (🗨️ + holder) — the user's TUI has no other source for
             // this fact, and the old code left a stale `wx ✓ <me>` from a
-            // previous run next to the hub plugin's `○ <holder>`, which read
+            // previous run next to the hub plugin's `🗨️ <holder>`, which read
             // as a contradiction. The bridge does NOT start here.
             hub.set_status(&rpi_hub_core::status::status_remote(&holder.full_name()));
             return Err(format!(
@@ -84,7 +93,16 @@ fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String>
     hub.set_credentials(&credentials.base_url, &credentials.token);
     let (sender, receiver) = mpsc::channel::<String>();
     hub.set_outbound(sender);
+    hub.set_degraded(false);
+    hub.clear_bridge_stop();
+    hub.set_lease_alive(true);
     *hub.user_id.lock().unwrap_or_else(|p| p.into_inner()) = Some(credentials.user_id.clone());
+
+    // OwnerLoop first: it owns renew/footer from now on. The bridge is
+    // started afterwards and reads `lease_alive` (already true), so there is
+    // no window where the bridge runs without an owner.
+    let owner = crate::owner::spawn(Arc::clone(hub));
+    hub.set_owner_thread(owner);
 
     let ctx = BridgeContext {
         client,
@@ -94,6 +112,7 @@ fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String>
     };
     let thread_hub = Arc::clone(hub);
     let status_hub = Arc::clone(hub);
+    let stop_hub = Arc::clone(hub);
     std::thread::Builder::new()
         .name("rpi-wechat-bridge".into())
         .spawn(move || {
@@ -101,11 +120,11 @@ fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String>
             runtime.block_on(async move {
                 let reason = bridge::run(thread_hub, ctx).await;
                 host::log(&format!("bridge stopped: {reason:?}"));
+                stop_hub.set_bridge_stop(reason);
             });
             status_hub.mark_stopped();
         })
         .map_err(|e| e.to_string())?;
-    hub.set_status(&rpi_hub_core::status::status_local(&hub.label()));
     Ok(())
 }
 
@@ -179,12 +198,14 @@ fn run_command(args: &str) -> Result<String, String> {
             if running {
                 return Err("桥已在运行（先 /wechat stop）".into());
             }
+            hub.set_session_expired(false);
             login_flow(&hub)
         }
         "start" => {
             if state::is_disabled(&dir) {
                 state::set_disabled(&dir, false).map_err(|e| e.to_string())?;
             }
+            hub.set_session_expired(false);
             if running {
                 return Ok("桥已在运行".into());
             }
@@ -400,10 +421,21 @@ mod tests {
     }
 }
 
-
-/// A lightweight watcher: periodically checks the wechat lease and takes it
-/// over when it is unowned/expired/dead — so the channel is never left
-/// unattended after a remote instance dies (its lease expires in 20s).
+/// A lightweight watcher: takes over the channel when it is genuinely
+/// unattended, and keeps the wechat footer truthful otherwise.
+///
+/// Anti-oscillation rules (the takeover-oscillation bug lived here):
+/// - it NEVER claims an unexpired lease held by a live instance (claiming
+///   `expires_at <= now` while the owner is mid-40s-poll is exactly how the
+///   generation flapping started — the owner loop is the only writer, and a
+///   healthy owner renews well before expiry);
+/// - it takes over ONLY when (a) there is no lease row, (b) the row expired
+///   AND its `updated_at` shows no recent renewal (a renewing-but-lagging
+///   owner keeps touching the row even while its expires_at lags one tick),
+///   or (c) the owner's presence row is gone (dead-owner takeover);
+/// - it does not restart after a session expiry: the credentials are dead,
+///   so retries would just churn the lease. `/wechat start|login` clears
+///   the latch.
 /// Skipped entirely when the user explicitly disabled the bridge.
 pub fn spawn_watcher(hub: &Arc<Hub>, credentials: Credentials) {
     let thread_hub = Arc::clone(hub);
@@ -411,50 +443,89 @@ pub fn spawn_watcher(hub: &Arc<Hub>, credentials: Credentials) {
     std::thread::Builder::new()
         .name("rpi-wechat-watcher".into())
         .spawn(move || {
+            // 200ms fact poll (see owner.rs FACT_POLL: cross-dylib
+            // Condvars are impossible — each plugin static-links its own
+            // copy of rpi-hub-core globals). An assign envelope to THIS
+            // instance becomes a running bridge — and a 💬 footer — within
+            // ~0.5s of the /use hand-off; a fenced remote bridge flips the
+            // footer to 🗨️ the moment its bridge thread exits.
             loop {
-                if thread_hub.shutdown.requested()
-                    || state::is_disabled(&dir)
-                {
+                if thread_hub.shutdown.requested() || state::is_disabled(&dir) {
                     return;
                 }
-                // Bridge already running in this process? Nothing to do.
+                // Bridge already running in this process? The OwnerLoop
+                // owns the footer while we hold; just yield briefly.
                 if thread_hub.bridge_running() {
-                    std::thread::sleep(Duration::from_secs(3));
+                    std::thread::sleep(Duration::from_millis(200));
                     continue;
                 }
-                // Try to claim: free / expired / dead-owner leases are granted.
-                let claim_result = thread_hub.claim_wechat();
-                if let Ok(rpi_hub_core::store::Claim::Held { holder }) = &claim_result {
-                    host::log(&format!(
-                        "watcher: wechat held by {} (gen {})",
-                        holder.owner_name, holder.generation
-                    ));
-                    // Keep the wechat slot truthful while another instance
-                    // holds the lease: without this, a slot left over from a
-                    // fenced bridge (e.g. '○ <old-holder>') or an even older
-                    // '● wx <me>' would sit in the footer forever — this
-                    // process runs nothing else that would refresh it.
-                    thread_hub.set_status(&rpi_hub_core::status::status_remote(
-                        &holder.full_name(),
-                    ));
+                if thread_hub.session_expired() {
+                    // Dead credentials: footer shows stopped, no claim churn.
+                    thread_hub.set_status(&rpi_hub_core::status::status_stopped("登录过期"));
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue;
                 }
-                match claim_result {
-                    Ok(rpi_hub_core::store::Claim::Granted { .. }) => {
-                        host::log("watcher: lease free — taking over the channel");
-                        if let Err(error) =
-                            spawn_bridge_public(&thread_hub, &credentials)
-                        {
+                let now = rpi_hub_core::now_ms();
+                match thread_hub.lease_owner.holder("wechat") {
+                    Ok(Some(holder)) => {
+                        let owner_present = thread_hub
+                            .store
+                            .get_instance_alive(&holder.owner_node)
+                            .ok()
+                            .flatten()
+                            .is_some();
+                        let ours = holder.owner_node == thread_hub.node_id;
+                        let recently_renewed = now - holder.updated_at < 30_000;
+                        let unattended =
+                            !owner_present || (holder.expires_at <= now && !recently_renewed);
+                        if ours && unattended && holder.expires_at <= now {
+                            // Our own stale row (owner loop died): take it
+                            // back via the normal claim path.
+                            start_from_watcher(&thread_hub, &credentials);
+                        } else if !ours && unattended {
                             host::log(&format!(
-                                "watcher: bridge start failed: {error}"
+                                "watcher: wechat unattended (owner {} gone/expired) — taking over",
+                                holder.full_name()
                             ));
+                            start_from_watcher(&thread_hub, &credentials);
+                        } else if !ours {
+                            // Held elsewhere and alive: footer from facts.
+                            thread_hub.set_status(&rpi_hub_core::status::status_remote(
+                                &holder.full_name(),
+                            ));
+                        } else {
+                            // Ours but the bridge is not running and the lease
+                            // is healthy: start the bridge to match the lease.
+                            start_from_watcher(&thread_hub, &credentials);
                         }
-                        // Bridge thread owns the lease renewal now.
-                        continue;
                     }
-                    _ => {}
+                    Ok(None) => {
+                        // No lease row: the channel is free.
+                        start_from_watcher(&thread_hub, &credentials);
+                    }
+                    Err(error) => {
+                        host::log(&format!("watcher: lease read failed: {error}"));
+                    }
                 }
-                std::thread::sleep(Duration::from_secs(3));
+                std::thread::sleep(Duration::from_millis(200));
             }
         })
         .ok();
+}
+
+/// Claim + start the bridge from the watcher; log failures and surface the
+/// remote-holder footer on a race loss.
+fn start_from_watcher(hub: &Arc<Hub>, credentials: &Credentials) {
+    match spawn_bridge_public(hub, credentials) {
+        Ok(()) => host::log("watcher: took over the wechat channel"),
+        Err(error) => {
+            host::log(&format!("watcher: bridge start failed: {error}"));
+            // The claim inside spawn_bridge may have raced a holder; show it.
+            if let Ok(Some(holder)) = hub.lease_owner.holder("wechat") {
+                if holder.owner_node != hub.node_id {
+                    hub.set_status(&rpi_hub_core::status::status_remote(&holder.full_name()));
+                }
+            }
+        }
+    }
 }

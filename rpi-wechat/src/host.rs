@@ -13,7 +13,7 @@ use rpi_hub_core::config::{self, HubConfig};
 use rpi_hub_core::names;
 use rpi_hub_core::now_ms;
 use rpi_hub_core::paths;
-use rpi_hub_core::store::{Claim, InstanceRecord, Store};
+use rpi_hub_core::store::{Claim, Store};
 use rpi_plugin_sdk::callbacks::OwnedString;
 use rpi_plugin_sdk::{RuntimeActionFn, RuntimeActionId, StbString, StbStringRef};
 
@@ -113,8 +113,9 @@ pub struct Hub {
     action_fn: std::sync::Mutex<RuntimeActionFn>,
     host_free: std::sync::Mutex<rpi_plugin_sdk::FreeStringFn>,
     pub shutdown: Shutdown,
-    /// Wechat lease held by this instance (generation bookkeeping; the claim
-    /// / renew / release calls themselves go through `lease_owner`).
+    /// The wechat lease held by this instance (generation bookkeeping; the
+    /// claim / renew / release calls themselves go through `lease_owner`).
+    /// Written by the OwnerLoop and the claim paths only.
     pub lease: Mutex<Option<HeldLease>>,
     /// The capability-split lease token (rpi-hub-core::lease): claim / renew
     /// / release / check for THIS node. The hub plugin has no such token.
@@ -125,6 +126,18 @@ pub struct Hub {
     outbound: Mutex<Option<std::sync::mpsc::Sender<String>>>,
     /// Whether the bridge thread is alive.
     running: AtomicBool,
+    /// Set by the OwnerLoop while this instance holds the wechat lease; the
+    /// bridge loop polls it and stops the moment it clears (single writer:
+    /// the owner thread — the bridge never touches the lease itself).
+    lease_alive: AtomicBool,
+    /// Outbound path degraded (stale context token); the OwnerLoop composes
+    /// the footer from this flag so the bridge stays a non-writer of status.
+    degraded: AtomicBool,
+    /// The bridge thread's last word before exiting (LeaseLost /
+    /// SessionExpired / Shutdown). Consumed by the OwnerLoop: SessionExpired
+    /// must release the lease instead of renewing it forever for a dead
+    /// bridge (the "actively holding while dead" antipattern).
+    bridge_stop: Mutex<Option<crate::bridge::StopReason>>,
     /// Resolved at bind time; media tools read credentials via these getters.
     credentials: Mutex<Option<(String, String)>>,
     /// Latest context_token from the last inbound message (media sendmessage
@@ -132,8 +145,12 @@ pub struct Hub {
     context_token: Mutex<Option<String>>,
     /// The WeChat bridge may inject agent input / show notices.
     pub disabled: AtomicBool,
-    /// Abort handle for the bridge's lease-renewal task.
-    renew_task: Mutex<Option<tokio::task::AbortHandle>>,
+    /// Set when the bridge stopped with SessionExpired: the credentials no
+    /// longer work, so the watcher must not auto-restart the bridge in a
+    /// login-fail loop. Cleared by `/wechat login` / `/wechat start`.
+    session_expired: AtomicBool,
+    /// The OwnerLoop thread's handle (joined on shutdown).
+    owner_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for Hub {
@@ -186,10 +203,14 @@ impl Hub {
             user_id: Mutex::new(None),
             credentials: Mutex::new(None),
             context_token: Mutex::new(None),
-            renew_task: Mutex::new(None),
+            bridge_stop: Mutex::new(None),
+            lease_alive: AtomicBool::new(false),
+            degraded: AtomicBool::new(false),
             outbound: Mutex::new(None),
             running: AtomicBool::new(false),
             disabled: AtomicBool::new(false),
+            session_expired: AtomicBool::new(false),
+            owner_thread: Mutex::new(None),
         }))
     }
 
@@ -360,17 +381,6 @@ impl Hub {
     }
 
     /// Refresh the shared context token (called on every authorized inbound).
-    /// Register the lease-renewal task's abort handle (bridge startup).
-    pub fn set_renew_task(&self, handle: tokio::task::AbortHandle) {
-        *self.renew_task.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
-    }
-
-    pub fn abort_renew_task(&self) {
-        if let Some(handle) = self.renew_task.lock().unwrap_or_else(|p| p.into_inner()).take() {
-            handle.abort();
-        }
-    }
-
     pub fn set_context_token(&self, token: Option<&str>) {
         *self.context_token.lock().unwrap_or_else(|p| p.into_inner()) = token.map(str::to_string);
     }
@@ -380,6 +390,69 @@ impl Hub {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    /// Lease liveness flag (written by the OwnerLoop only).
+    pub fn lease_alive(&self) -> bool {
+        self.lease_alive.load(Ordering::Acquire)
+    }
+
+    pub fn set_lease_alive(&self, alive: bool) {
+        self.lease_alive.store(alive, Ordering::Release);
+    }
+
+    /// Outbound degraded flag (written by the bridge only).
+    pub fn degraded(&self) -> bool {
+        self.degraded.load(Ordering::Acquire)
+    }
+
+    pub fn set_degraded(&self, degraded: bool) {
+        self.degraded.store(degraded, Ordering::Release);
+    }
+
+    /// Record why the bridge thread is about to exit (written once by the
+    /// bridge thread; consumed by the OwnerLoop).
+    pub fn set_bridge_stop(&self, reason: crate::bridge::StopReason) {
+        *self.bridge_stop.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason);
+    }
+
+    pub fn clear_bridge_stop(&self) {
+        *self.bridge_stop.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    pub fn take_bridge_stop(&self) -> Option<crate::bridge::StopReason> {
+        self.bridge_stop
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+    }
+
+    /// Session-expiry latch (see the field docs).
+    pub fn set_session_expired(&self, expired: bool) {
+        self.session_expired.store(expired, Ordering::Release);
+    }
+
+    pub fn session_expired(&self) -> bool {
+        self.session_expired.load(Ordering::Acquire)
+    }
+
+    /// Register the OwnerLoop's handle so shutdown can join it.
+    pub fn set_owner_thread(&self, handle: std::thread::JoinHandle<()>) {
+        *self.owner_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
+    }
+
+    /// Stop and join the OwnerLoop (it observes the shutdown flag within one
+    /// 200 ms wait, so this returns quickly).
+    pub fn stop_owner(&self) {
+        self.request_shutdown();
+        let handle = self
+            .owner_thread
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        if let Some(handle) = handle {
+            let _ = handle.join();
+        }
     }
 
     /// Cache credentials for the outbound media tools.
@@ -438,23 +511,12 @@ impl Hub {
         }
     }
 
-    /// Mark the bridge stopped (called when the thread exits).
+    /// Mark the bridge stopped (called when the thread exits). Footer is
+    /// deliberately NOT written here: the wechat status slot has exactly two
+    /// writers — the OwnerLoop (while holding) and the watcher (otherwise).
     pub fn mark_stopped(&self) {
         self.running.store(false, Ordering::Release);
         *self.outbound.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        // Show WHO holds the lease now when this bridge stopped because it
-        // was fenced (`/use` hand-off); a plain ✗ only for a real stop. The
-        // wechat claim uses this plugin's plain node_id (see claim_wechat).
-        let holder = self
-            .lease_owner
-            .holder("wechat")
-            .ok()
-            .flatten()
-            .filter(|h| h.owner_node != self.node_id);
-        match holder {
-            Some(h) => self.set_status(&rpi_hub_core::status::status_remote(&h.full_name())),
-            None => self.set_status(&rpi_hub_core::status::status_stopped("停止")),
-        }
     }
 
     /// Stop the bridge thread (bounded by the lifecycle finish budget).
@@ -472,30 +534,6 @@ impl Hub {
     pub fn record_error(&self, message: impl Into<String>) {
         let message = message.into();
         log(&format!("error: {message}"));
-    }
-
-    /// Presence record (role `normal`; the rpi-hub plugin in the same process
-    /// registers the authoritative row — this one is only written when
-    /// rpi-hub is absent, and uses a distinct role so `/instances` can tell).
-    pub fn record(&self, last_seen: i64) -> InstanceRecord {
-        InstanceRecord {
-            node_id: format!("{}-wechat", self.node_id),
-            name: format!("{}-wechat", self.name()),
-            host: self.host.clone(),
-            pid: std::process::id(),
-            cwd: std::env::current_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string(),
-            role: "channel".into(),
-            epoch: self.epoch.clone(),
-            session_id: None,
-            title: None,
-            model: None,
-            busy: self.busy.load(Ordering::Acquire),
-            started_at: last_seen,
-            last_seen,
-        }
     }
 }
 

@@ -41,13 +41,7 @@ pub trait HubStore: Send + Sync + std::fmt::Debug {
         record: &InstanceRecord,
         alive_ms: i64,
     ) -> Result<crate::store::RegisteredInstance>;
-    fn heartbeat(
-        &self,
-        node_id: &str,
-        epoch: &str,
-        now: i64,
-        beat: &Heartbeat,
-    ) -> Result<bool>;
+    fn heartbeat(&self, node_id: &str, epoch: &str, now: i64, beat: &Heartbeat) -> Result<bool>;
     fn list_instances(&self, now: i64, alive_ms: i64) -> Result<Vec<InstanceView>>;
     fn get_instance(&self, node_id: &str) -> Result<Option<InstanceView>>;
     fn unregister_instance(&self, node_id: &str, epoch: &str) -> Result<bool>;
@@ -101,6 +95,34 @@ pub trait HubStore: Send + Sync + std::fmt::Debug {
     fn mark_seen(&self, id: &str, now: i64) -> Result<bool>;
     fn prune(&self, now: i64, alive_ms: i64) -> Result<PruneReport>;
     fn stats(&self, now: i64) -> Result<Stats>;
+
+    /// `list_instances` filtered for same-host dead pids — what every
+    /// command/tool should show. Default impl: reap locally, then delegate.
+    fn list_instances_alive(&self, now: i64, alive_ms: i64) -> Result<Vec<InstanceView>> {
+        let _ = self.reap_dead_local_instances();
+        self.list_instances(now, alive_ms)
+    }
+
+    /// `get_instance` with the same filter (read-only: the dead same-host
+    /// row is hidden, not deleted).
+    fn get_instance_alive(&self, node_id: &str) -> Result<Option<InstanceView>> {
+        let Some(view) = self.get_instance(node_id)? else {
+            return Ok(None);
+        };
+        if view.host == crate::store::local_host_name() && !crate::store::pid_alive(view.pid) {
+            return Ok(None);
+        }
+        Ok(Some(view))
+    }
+
+    /// Drop presence rows of same-host pids that are demonstrably dead
+    /// (`kill(pid, 0)` fails). Only the local Store reaps; remote clients
+    /// keep the no-op default (a foreign machine's pids are meaningless
+    /// here). A C-c'd process must not keep appearing in `/instances` or
+    /// gate the dead-owner lease takeover for the rest of the 30s window.
+    fn reap_dead_local_instances(&self) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 impl HubStore for Store {
@@ -119,6 +141,35 @@ impl HubStore for Store {
     }
     fn get_instance(&self, node_id: &str) -> Result<Option<InstanceView>> {
         Store::get_instance(self, node_id)
+    }
+    /// `list_instances` filtered for same-host dead pids — what every
+    /// command/tool should show. Default impl: local reaping + delegate to
+    /// `list_instances`. The remote relay client overrides this: reaping is
+    /// meaningless on the wrong machine, the relay host does it on its own
+    /// worker tick.
+    fn list_instances_alive(&self, now: i64, alive_ms: i64) -> Result<Vec<InstanceView>> {
+        let _ = self.reap_dead_local_instances();
+        self.list_instances(now, alive_ms)
+    }
+
+    /// `get_instance` filtered the same way (read-only; the dead same-host
+    /// row is hidden, not deleted).
+    fn get_instance_alive(&self, node_id: &str) -> Result<Option<InstanceView>> {
+        let Some(view) = self.get_instance(node_id)? else {
+            return Ok(None);
+        };
+        if view.host == crate::store::local_host_name() && !crate::store::pid_alive(view.pid) {
+            return Ok(None);
+        }
+        Ok(Some(view))
+    }
+
+    /// Drop presence rows of same-host pids that are demonstrably dead
+    /// (`kill(pid, 0)` fails). Only the local Store reaps; the default (and
+    /// the relay client's) is a no-op because a foreign machine's pids are
+    /// meaningless here.
+    fn reap_dead_local_instances(&self) -> Result<usize> {
+        Store::reap_dead_local_instances(self)
     }
     fn unregister_instance(&self, node_id: &str, epoch: &str) -> Result<bool> {
         Store::unregister_instance(self, node_id, epoch)
@@ -164,15 +215,7 @@ impl HubStore for Store {
         now: i64,
         ttl_ms: i64,
     ) -> Result<i64> {
-        Store::assign_lease(
-            self,
-            capability,
-            to_node,
-            to_name,
-            owner_epoch,
-            now,
-            ttl_ms,
-        )
+        Store::assign_lease(self, capability, to_node, to_name, owner_epoch, now, ttl_ms)
     }
     fn release_lease(
         &self,

@@ -42,25 +42,28 @@ impl Default for HubConfig {
     }
 }
 
+/// Floor for the lease TTL: it must outlast the wechat bridge's longest
+/// blocking call. `getupdates` is a 40 s server-side long poll (45 s client
+/// timeout); a TTL at or below that would let the lease expire mid-poll even
+/// with a healthy owner — the root cause of the takeover-oscillation bug.
+pub const MIN_TTL_SECONDS: u64 = 45;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LeaseConfig {
     /// How long a lease survives without a renewal. A paused or half-dead owner
     /// must not keep the WeChat bridge for longer than this.
     pub ttl_seconds: u64,
-    /// Renewal period. Must be comfortably below `ttl_seconds`.
+    /// Renewal period, enforced by the wechat OwnerLoop (the lease's single
+    /// writer). Must be comfortably below `ttl_seconds`.
     pub renew_seconds: u64,
-    /// How long a *reconnected* node gets to re-claim the lease it held before
-    /// a reload, without bumping the fencing generation.
-    pub resume_grace_seconds: u64,
 }
 
 impl Default for LeaseConfig {
     fn default() -> Self {
         Self {
-            ttl_seconds: 20,
+            ttl_seconds: 60,
             renew_seconds: 5,
-            resume_grace_seconds: 10,
         }
     }
 }
@@ -72,8 +75,24 @@ impl LeaseConfig {
     pub fn renew_ms(&self) -> i64 {
         (self.renew_seconds.clamp(1, self.ttl_seconds.max(2)) as i64) * 1000
     }
-    pub fn resume_grace_ms(&self) -> i64 {
-        (self.resume_grace_seconds as i64) * 1000
+
+    /// Timing warnings (never fatal): renew must fit well inside the TTL, and
+    /// the TTL must outlast the wechat bridge's longest poll.
+    pub fn validate(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self.ttl_seconds < MIN_TTL_SECONDS {
+            warnings.push(format!(
+                "lease.ttlSeconds={} is below the {}s floor: the wechat bridge polls getupdates for up to 40s and the lease would expire mid-poll, inviting takeover oscillation",
+                self.ttl_seconds, MIN_TTL_SECONDS
+            ));
+        }
+        if self.renew_seconds > self.ttl_seconds / 4 {
+            warnings.push(format!(
+                "lease.renewSeconds={} is more than a quarter of ttlSeconds={}; renewals may not land before expiry",
+                self.renew_seconds, self.ttl_seconds
+            ));
+        }
+        warnings
     }
 }
 
@@ -95,7 +114,6 @@ pub struct RemoteConfig {
     pub mode: RemoteMode,
     pub relay: RelayConfig,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -140,26 +158,10 @@ pub struct ChannelsConfig {
     pub wechat: ChannelConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ChannelConfig {
     pub enabled: bool,
-    /// Claim the channel lease automatically when it is free.
-    pub auto_claim: bool,
-}
-
-impl Default for ChannelConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            // The rpi-wechat plugin owns the wechat lease (claims on bridge
-            // start, renews on its own tick). The hub worker auto-claiming the
-            // same capability in the same process would swap the owner epoch
-            // and fence the bridge out within one tick — LeaseLost on every
-            // startup. Channels without a dedicated plugin can set this true.
-            auto_claim: false,
-        }
-    }
 }
 
 /// `/start` launch mode. Only `tmux` is implemented; `none` disables the
@@ -291,7 +293,10 @@ pub fn load(dir: &Path) -> Result<(HubConfig, Vec<String>)> {
         Err(error) => return Err(HubError::Io(error)),
     };
     match serde_json::from_str::<HubConfig>(&text) {
-        Ok(config) => Ok((config, warnings)),
+        Ok(config) => {
+            warnings.extend(config.lease.validate());
+            Ok((config, warnings))
+        }
         Err(error) => {
             warnings.push(format!(
                 "{}: invalid config ({error}); using defaults (old file kept as config.json.broken)",
@@ -376,6 +381,48 @@ mod tests {
     fn lease_timing_defaults_are_sane() {
         let lease = LeaseConfig::default();
         assert!(lease.renew_ms() < lease.ttl_ms());
-        assert_eq!(lease.ttl_ms(), 20_000);
+        // The default TTL must outlast the wechat bridge's 40s long poll.
+        assert_eq!(lease.ttl_ms(), 60_000);
+        assert!(lease.validate().is_empty());
+    }
+
+    #[test]
+    fn lease_validation_flags_bad_timing() {
+        let short = LeaseConfig {
+            ttl_seconds: 20,
+            renew_seconds: 5,
+        };
+        let warnings = short.validate();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("45s floor"), "{warnings:?}");
+
+        let sparse = LeaseConfig {
+            ttl_seconds: 60,
+            renew_seconds: 30,
+        };
+        let warnings = sparse.validate();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("quarter"), "{warnings:?}");
+    }
+
+    #[test]
+    fn legacy_config_keys_are_ignored() {
+        let dir = temp_dir("legacy-keys");
+        // A config written by an older build carries autoClaim and
+        // resumeGraceSeconds; the current loader must accept it unchanged.
+        std::fs::write(
+            paths::config_path(&dir),
+            r#"{
+              "version": 1,
+              "lease": {"ttlSeconds": 90, "renewSeconds": 5, "resumeGraceSeconds": 10},
+              "channels": {"wechat": {"enabled": true, "autoClaim": false}}
+            }"#,
+        )
+        .unwrap();
+        let (config, warnings) = load(&dir).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(config.lease.ttl_seconds, 90);
+        assert!(config.channels.wechat.enabled);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
