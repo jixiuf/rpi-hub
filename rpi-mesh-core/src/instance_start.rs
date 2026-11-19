@@ -21,7 +21,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::api::HubStore;
+use crate::api::MeshStore;
 use crate::config::SpawnMode;
 use crate::now_ms;
 use crate::store::InstanceView;
@@ -168,9 +168,9 @@ fn next_session_name(spawner: &dyn InstanceSpawner, prefix: &str, base: &str) ->
 }
 
 /// What the spawn/stop functions need from the calling plugin. Both plugins
-/// assemble this from their own Hub — no cross-plugin type dependency.
+/// assemble this from the mesh state — no cross-plugin type dependency.
 pub struct SpawnContext<'a> {
-    pub store: &'a Arc<dyn HubStore>,
+    pub store: &'a Arc<dyn MeshStore>,
     /// The calling instance's node_id (self-identification).
     pub node_id: &'a str,
     /// The calling instance's host (stop is local-machine only).

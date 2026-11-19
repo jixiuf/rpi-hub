@@ -1,4 +1,4 @@
-//! The storage surface the hub uses, so a node can either own the database
+//! The storage surface the mesh uses, so a node can either own the database
 //! (`Store`) or talk to a relay that does (`wire::RemoteStore`).
 //!
 //! Keeping the plugins on this trait is what makes cross-machine a transport
@@ -37,7 +37,7 @@ pub mod method {
     pub const SET_CHANNEL_STATE: &str = "set_channel_state";
 }
 
-pub trait HubStore: Send + Sync + std::fmt::Debug {
+pub trait MeshStore: Send + Sync + std::fmt::Debug {
     fn register_instance(
         &self,
         record: &InstanceRecord,
@@ -128,7 +128,7 @@ pub trait HubStore: Send + Sync + std::fmt::Debug {
     }
 }
 
-impl HubStore for Store {
+impl MeshStore for Store {
     fn register_instance(
         &self,
         record: &InstanceRecord,

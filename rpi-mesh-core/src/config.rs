@@ -1,20 +1,20 @@
-//! `~/.rpi/agent/pi-hub/config.json`.
+//! `~/.rpi/agent/pi-mesh/config.json`.
 //!
-//! Precedence: `RPI_HUB_DIR` / `RPI_HUB_INSTANCE` env, then the file, then the
+//! Precedence: `RPI_MESH_DIR` / `RPI_MESH_INSTANCE` env, then the file, then the
 //! built-in defaults. A corrupt file is kept (renamed to `config.json.broken`)
-//! and replaced with defaults: a broken config must never stop the hub.
+//! and replaced with defaults: a broken config must never stop the mesh.
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{names, paths, HubError, Result};
+use crate::{names, paths, MeshError, Result};
 
 pub const CONFIG_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
-pub struct HubConfig {
+pub struct MeshConfig {
     /// Schema marker so a future change can migrate instead of guessing.
     pub version: u32,
     /// Display name for this instance; defaults to the project directory name.
@@ -28,7 +28,7 @@ pub struct HubConfig {
     pub instance_spawn: InstanceSpawnConfig,
 }
 
-impl Default for HubConfig {
+impl Default for MeshConfig {
     fn default() -> Self {
         Self {
             version: CONFIG_VERSION,
@@ -104,7 +104,7 @@ pub enum RemoteMode {
     Local,
     /// This node owns the database *and* serves remote nodes on `relay`.
     Relay,
-    /// This node's hub state lives on a relay reached through `relay`.
+    /// This node's mesh state lives on a relay reached through `relay`.
     Client,
 }
 
@@ -131,8 +131,8 @@ pub struct RelayConfig {
     pub token_file: Option<String>,
     /// Speak HTTP at the front door so the relay can share a port that a
     /// firewall already forwards to a real HTTP service. On: the relay answers
-    /// `POST /hub-rpc` with `Content-Type: application/json` bodies (one JSON
-    /// request/response per call, X-Hub-Auth: <token> header), so a proxy or
+    /// `POST /mesh-rpc` with `Content-Type: application/json` bodies (one JSON
+    /// request/response per call, X-Mesh-Auth: <token> header), so a proxy or
     /// co-located server routes us by path. Off: raw line-delimited JSON-RPC
     /// (leaner, for a dedicated port).
     #[serde(default)]
@@ -253,8 +253,8 @@ impl Default for LimitsConfig {
     }
 }
 
-impl HubConfig {
-    /// Effective display name: `RPI_HUB_INSTANCE`, then the file, then cwd.
+impl MeshConfig {
+    /// Effective display name: `RPI_MESH_INSTANCE`, then the file, then cwd.
     pub fn resolved_name(&self, cwd: &Path) -> String {
         if let Some(name) = paths::instance_override() {
             return names::sanitize(&name);
@@ -269,19 +269,19 @@ impl HubConfig {
 /// Load the config, creating a default file on first use.
 ///
 /// Warnings are returned rather than logged: the caller owns logging.
-pub fn load(dir: &Path) -> Result<(HubConfig, Vec<String>)> {
+pub fn load(dir: &Path) -> Result<(MeshConfig, Vec<String>)> {
     let mut warnings = Vec::new();
     let path = paths::config_path(dir);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let config = HubConfig::default();
+            let config = MeshConfig::default();
             write(dir, &config)?;
             return Ok((config, warnings));
         }
-        Err(error) => return Err(HubError::Io(error)),
+        Err(error) => return Err(MeshError::Io(error)),
     };
-    match serde_json::from_str::<HubConfig>(&text) {
+    match serde_json::from_str::<MeshConfig>(&text) {
         Ok(config) => {
             warnings.extend(config.lease.validate());
             Ok((config, warnings))
@@ -293,14 +293,14 @@ pub fn load(dir: &Path) -> Result<(HubConfig, Vec<String>)> {
             ));
             let backup = path.with_extension("json.broken");
             let _ = std::fs::rename(&path, &backup);
-            let config = HubConfig::default();
+            let config = MeshConfig::default();
             write(dir, &config)?;
             Ok((config, warnings))
         }
     }
 }
 
-pub fn write(dir: &Path, config: &HubConfig) -> Result<()> {
+pub fn write(dir: &Path, config: &MeshConfig) -> Result<()> {
     paths::ensure_private_dir(dir)?;
     let path = paths::config_path(dir);
     // Unique temp name: two instances starting at the same moment must not
@@ -314,7 +314,7 @@ pub fn write(dir: &Path, config: &HubConfig) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && path.exists() => {}
         Err(error) => {
             let _ = std::fs::remove_file(&tmp);
-            return Err(HubError::Io(error));
+            return Err(MeshError::Io(error));
         }
     }
     paths::restrict_permissions(&path, 0o600)?;
@@ -328,7 +328,7 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "rpi-hub-config-{name}-{}-{}",
+            "rpi-mesh-config-{name}-{}-{}",
             std::process::id(),
             crate::now_ms()
         ));
@@ -342,7 +342,7 @@ mod tests {
         let dir = temp_dir("defaults");
         let (config, warnings) = load(&dir).unwrap();
         assert!(warnings.is_empty());
-        assert_eq!(config, HubConfig::default());
+        assert_eq!(config, MeshConfig::default());
         assert!(paths::config_path(&dir).exists());
 
         let mut changed = config.clone();
@@ -360,7 +360,7 @@ mod tests {
         let dir = temp_dir("broken");
         std::fs::write(paths::config_path(&dir), "{ not json").unwrap();
         let (config, warnings) = load(&dir).unwrap();
-        assert_eq!(config, HubConfig::default());
+        assert_eq!(config, MeshConfig::default());
         assert_eq!(warnings.len(), 1);
         assert!(dir.join("config.json.broken").exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -379,19 +379,19 @@ mod tests {
     fn instance_spawn_mode_is_optional() {
         // Omitting `mode` entirely must load as Auto (the default), not fail
         // the whole config into the broken-file fallback.
-        let config: HubConfig =
+        let config: MeshConfig =
             serde_json::from_str(r#"{"instanceSpawn": {"command": "rpi"}}"#).unwrap();
         assert_eq!(config.instance_spawn.mode, SpawnMode::Auto);
     }
 
     #[test]
     fn spawn_mode_parses_the_single_spelling() {
-        let config: HubConfig =
+        let config: MeshConfig =
             serde_json::from_str(r#"{"instanceSpawn": {"mode": "auto"}}"#).unwrap();
         assert_eq!(config.instance_spawn.mode, SpawnMode::Auto);
         // An unknown old spelling does not load — and the loader's broken-file
         // path then falls back to defaults, which is the correct behavior.
-        assert!(serde_json::from_str::<HubConfig>(r#"{"instanceSpawn": {"mode": "current"}}"#).is_err());
+        assert!(serde_json::from_str::<MeshConfig>(r#"{"instanceSpawn": {"mode": "current"}}"#).is_err());
     }
 
     #[test]

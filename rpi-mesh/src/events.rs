@@ -6,12 +6,12 @@
 
 use rpi_plugin_sdk::{EventHandlerFn, EventTag};
 
-use crate::hub;
+use crate::mesh;
 
 rpi_plugin_sdk::event_handler! {
     fn on_session_shutdown(_event, _user_data) {
-        if let Some(hub) = hub::current() {
-            hub.request_shutdown();
+        if let Some(mesh) = mesh::current() {
+            mesh.request_shutdown();
         }
         0
     }
@@ -28,8 +28,8 @@ pub fn registry() -> Vec<(EventTag, EventHandlerFn)> {
 
 rpi_plugin_sdk::event_handler! {
     fn on_agent_start(_event, _user_data) {
-        if let Some(hub) = hub::current() {
-            hub.set_busy(true);
+        if let Some(mesh) = mesh::current() {
+            mesh.set_busy(true);
         }
         0
     }
@@ -37,8 +37,8 @@ rpi_plugin_sdk::event_handler! {
 
 rpi_plugin_sdk::event_handler! {
     fn on_agent_end(_event, _user_data) {
-        if let Some(hub) = hub::current() {
-            hub.set_busy(false);
+        if let Some(mesh) = mesh::current() {
+            mesh.set_busy(false);
         }
         0
     }
@@ -46,8 +46,8 @@ rpi_plugin_sdk::event_handler! {
 
 rpi_plugin_sdk::event_handler! {
     fn on_agent_settled(_event, _user_data) {
-        if let Some(hub) = hub::current() {
-            hub.set_busy(false);
+        if let Some(mesh) = mesh::current() {
+            mesh.set_busy(false);
         }
         0
     }

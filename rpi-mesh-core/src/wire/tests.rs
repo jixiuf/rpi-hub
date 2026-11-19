@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::{serve, Endpoint, RemoteStore, Token};
 use std::path::PathBuf;
-use crate::api::HubStore;
+use crate::api::MeshStore;
 use crate::protocol::Envelope;
 use crate::store::{Claim, Heartbeat, InstanceRecord, Store};
 
@@ -185,7 +185,7 @@ fn a_missing_relay_surfaces_a_clear_error() {
         Token::from_hex(&"ab".repeat(16)).unwrap(),
     );
     let error = client.list_instances(0, ALIVE).unwrap_err();
-    assert!(error.to_string().contains("cannot reach the hub relay"), "{error}");
+    assert!(error.to_string().contains("cannot reach the mesh relay"), "{error}");
 }
 
 #[test]

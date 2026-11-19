@@ -1,30 +1,30 @@
-//! State paths. Everything lives under `~/.rpi/agent/pi-hub` unless
-//! `RPI_HUB_DIR` overrides it (tests, throwaway clusters).
+//! State paths. Everything lives under `~/.rpi/agent/mesh` unless
+//! `RPI_MESH_DIR` overrides it (tests, throwaway clusters).
 
 use std::path::{Path, PathBuf};
 
-use crate::{HubError, Result};
+use crate::{MeshError, Result};
 
-pub const HUB_DIR_ENV: &str = "RPI_HUB_DIR";
-pub const INSTANCE_ENV: &str = "RPI_HUB_INSTANCE";
+pub const MESH_DIR_ENV: &str = "RPI_MESH_DIR";
+pub const INSTANCE_ENV: &str = "RPI_MESH_INSTANCE";
 
-pub const DB_FILE: &str = "hub.db";
+pub const DB_FILE: &str = "mesh.db";
 pub const CONFIG_FILE: &str = "config.json";
 pub const WECHAT_DIR: &str = "wechat";
 pub const LOG_DIR: &str = "logs";
 pub const RELAY_SOCKET: &str = "relay.sock";
 pub const TUNNEL_SOCKET: &str = "tunnel.sock";
 
-/// `$RPI_HUB_DIR`, else `~/.rpi/agent/pi-hub`.
-pub fn hub_dir() -> Result<PathBuf> {
-    if let Some(dir) = env_override(HUB_DIR_ENV) {
+/// `$RPI_MESH_DIR`, else `~/.rpi/agent/mesh`.
+pub fn mesh_dir() -> Result<PathBuf> {
+    if let Some(dir) = env_override(MESH_DIR_ENV) {
         return Ok(PathBuf::from(dir));
     }
     let home = home_dir()?;
-    Ok(home.join(".rpi").join("agent").join("pi-hub"))
+    Ok(home.join(".rpi").join("agent").join("mesh"))
 }
 
-/// The instance-name override, if any (`RPI_HUB_INSTANCE`).
+/// The instance-name override, if any (`RPI_MESH_INSTANCE`).
 pub fn instance_override() -> Option<String> {
     env_override(INSTANCE_ENV)
 }
@@ -63,7 +63,7 @@ pub fn ensure_private_dir(path: &Path) -> Result<()> {
 /// Restrict a file or directory to the current user (no-op on Windows).
 ///
 /// Best effort: on some filesystems (NFS homes, odd mounts) chmod may be
-/// rejected. That must not stop the hub — log it through the wire hook and
+/// rejected. That must not stop the mesh — log it through the wire hook and
 /// continue, since the token file's secrecy then depends on the mount.
 pub fn restrict_permissions(path: &Path, mode: u32) -> Result<()> {
     #[cfg(unix)]
@@ -99,7 +99,7 @@ fn home_dir() -> Result<PathBuf> {
     if let Some(home) = env_override("HOME").or_else(|| env_override("USERPROFILE")) {
         return Ok(PathBuf::from(home));
     }
-    Err(HubError::invalid(
-        "cannot resolve home directory (set HOME or RPI_HUB_DIR)",
+    Err(MeshError::invalid(
+        "cannot resolve home directory (set HOME or RPI_MESH_DIR)",
     ))
 }

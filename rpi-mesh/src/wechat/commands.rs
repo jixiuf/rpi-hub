@@ -9,7 +9,7 @@ use rpi_plugin_sdk::{CommandHandlerFn, EventHandlerFn, EventTag, StbString, StbS
 use rpi_mesh_core::now_ms;
 
 use crate::wechat::bridge::{self, BridgeContext};
-use crate::wechat::hub::Hub;
+use crate::wechat::channel::Channel;
 use crate::wechat::ilink::IlinkClient;
 use crate::wechat::state::{self, Credentials};
 
@@ -47,8 +47,8 @@ fn args_of(raw: StbStringRef) -> String {
         .unwrap_or(text)
 }
 
-fn hub() -> Result<Arc<Hub>, String> {
-    crate::wechat::hub::current().ok_or_else(|| "rpi-wechat 未初始化".to_string())
+fn mesh() -> Result<Arc<Channel>, String> {
+    crate::wechat::channel::current().ok_or_else(|| "rpi-wechat 未初始化".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -56,62 +56,62 @@ fn hub() -> Result<Arc<Hub>, String> {
 // ---------------------------------------------------------------------------
 
 /// Public wrapper for the mesh bootstrap (lib.rs).
-pub fn spawn_bridge_public(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String> {
-    spawn_bridge(hub, credentials)
+pub fn spawn_bridge_public(mesh: &Arc<Channel>, credentials: &Credentials) -> Result<(), String> {
+    spawn_bridge(mesh, credentials)
 }
 
 /// Plugin-load bootstrap for the wechat channel (called from lib.rs):
 /// auto-start the bridge when credentials exist and the channel is enabled,
 /// then arm the watcher for takeover.
-pub fn bootstrap(hub: &Arc<Hub>) {
-    let dir = hub.dir();
+pub fn bootstrap(mesh: &Arc<Channel>) {
+    let dir = mesh.dir();
     if crate::wechat::state::is_disabled(&dir) {
         return;
     }
     let Some(credentials) = crate::wechat::state::Credentials::load(&dir) else {
         return;
     };
-    match spawn_bridge_public(hub, &credentials) {
-        Ok(()) => crate::wechat::hub::log("bridge auto-started"),
-        Err(error) => crate::wechat::hub::log(&format!(
+    match spawn_bridge_public(mesh, &credentials) {
+        Ok(()) => crate::wechat::channel::log("bridge auto-started"),
+        Err(error) => crate::wechat::channel::log(&format!(
             "bridge auto-start deferred: {error}; watcher will take over"
         )),
     }
-    if !hub.session_expired() {
-        spawn_watcher(Arc::clone(hub), credentials);
+    if !mesh.session_expired() {
+        spawn_watcher(Arc::clone(mesh), credentials);
     }
 }
 
 /// Unified shutdown (worker lifecycle): stop owner loop, stop bridge, release
 /// the lease. Idempotent.
-pub fn shutdown_channel(hub: &Arc<Hub>) {
-    crate::wechat::hub::log("wechat channel shutdown");
-    hub.stop_owner();
-    hub.stop_thread();
-    crate::wechat::bridge::release_and_stop(hub);
+pub fn shutdown_channel(mesh: &Arc<Channel>) {
+    crate::wechat::channel::log("wechat channel shutdown");
+    mesh.stop_owner();
+    mesh.stop_thread();
+    crate::wechat::bridge::release_and_stop(mesh);
 }
 
 /// Spawn the bridge thread with a fresh client and channel.
-fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String> {
+fn spawn_bridge(mesh: &Arc<Channel>, credentials: &Credentials) -> Result<(), String> {
     // Sync the store-resolved display name BEFORE the claim: the store may
     // have renamed us at registration (`-<pid>` suffix on name collision),
     // and the claim/resume writes carry `node_name` — without this the lease
     // row's owner_name is overwritten with the RAW config name (the same
     // base name as the colliding instance), corrupting every holder display.
-    if let Some(view) = hub.store().get_instance_alive(&hub.node_id()).ok().flatten() {
-        hub.lease_owner.set_node_name(&view.name);
-        hub.set_name(&view.name);
+    if let Some(view) = mesh.store().get_instance_alive(&mesh.node_id()).ok().flatten() {
+        mesh.lease_owner.set_node_name(&view.name);
+        mesh.set_name(&view.name);
     }
     // Lease: claim (auto) — a held lease from another instance is an error.
-    match hub.claim_wechat().map_err(|e| e.to_string())? {
+    match mesh.claim_wechat().map_err(|e| e.to_string())? {
         rpi_mesh_core::store::Claim::Granted { .. } => {}
         rpi_mesh_core::store::Claim::Held { holder } => {
             // Another instance answers WeChat right now. The STATUS line must
             // say so (🗨️ + holder) — the user's TUI has no other source for
             // this fact, and the old code left a stale `wx ✓ <me>` from a
-            // previous run next to the hub plugin's `🗨️ <holder>`, which read
+            // previous run next to the mesh plugin's `🗨️ <holder>`, which read
             // as a contradiction. The bridge does NOT start here.
-            hub.set_status(&rpi_mesh_core::status::status_remote(&holder.full_name()));
+            mesh.set_status(&rpi_mesh_core::status::status_remote(&holder.full_name()));
             return Err(format!(
                 "微信被 {} 持有（/use 切换后重试，或等待其 TTL 过期）",
                 holder.owner_name
@@ -121,39 +121,39 @@ fn spawn_bridge(hub: &Arc<Hub>, credentials: &Credentials) -> Result<(), String>
 
     let client =
         IlinkClient::new(&credentials.base_url, &credentials.token).map_err(|e| e.to_string())?;
-    hub.set_credentials(&credentials.base_url, &credentials.token);
+    mesh.set_credentials(&credentials.base_url, &credentials.token);
     let (sender, receiver) = mpsc::channel::<String>();
-    hub.set_outbound(sender);
-    hub.set_degraded(false);
-    hub.clear_bridge_stop();
-    hub.set_lease_alive(true);
-    *hub.user_id.lock().unwrap_or_else(|p| p.into_inner()) = Some(credentials.user_id.clone());
+    mesh.set_outbound(sender);
+    mesh.set_degraded(false);
+    mesh.clear_bridge_stop();
+    mesh.set_lease_alive(true);
+    *mesh.user_id.lock().unwrap_or_else(|p| p.into_inner()) = Some(credentials.user_id.clone());
 
     // OwnerLoop first: it owns renew/footer from now on. The bridge is
     // started afterwards and reads `lease_alive` (already true), so there is
     // no window where the bridge runs without an owner.
-    let owner = crate::wechat::owner::spawn(Arc::clone(hub));
-    hub.set_owner_thread(owner);
+    let owner = crate::wechat::owner::spawn(Arc::clone(mesh));
+    mesh.set_owner_thread(owner);
 
     let ctx = BridgeContext {
         client,
         user_id: credentials.user_id.clone(),
-        cursor: state::load_cursor(&hub.dir()).unwrap_or_default(),
+        cursor: state::load_cursor(&mesh.dir()).unwrap_or_default(),
         outbound: receiver,
     };
-    let thread_hub = Arc::clone(&hub);
-    let status_hub = Arc::clone(hub);
-    let stop_hub = Arc::clone(hub);
+    let thread_mesh = Arc::clone(&mesh);
+    let status_mesh = Arc::clone(mesh);
+    let stop_mesh = Arc::clone(mesh);
     std::thread::Builder::new()
         .name("rpi-wechat-bridge".into())
         .spawn(move || {
             let runtime = std::sync::Arc::new(tokio_lite());
             runtime.block_on(async move {
-                let reason = bridge::run(thread_hub, ctx).await;
-                crate::wechat::hub::log(&format!("bridge stopped: {reason:?}"));
-                stop_hub.set_bridge_stop(reason);
+                let reason = bridge::run(thread_mesh, ctx).await;
+                crate::wechat::channel::log(&format!("bridge stopped: {reason:?}"));
+                stop_mesh.set_bridge_stop(reason);
             });
-            status_hub.mark_stopped();
+            status_mesh.mark_stopped();
         })
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -177,7 +177,7 @@ extern "C" fn cmd_wechat(
     _ud: *mut std::ffi::c_void,
 ) -> i32 {
     let args = args_of(raw);
-    crate::wechat::hub::log(&format!("cmd /wechat {args:?}"));
+    crate::wechat::channel::log(&format!("cmd /wechat {args:?}"));
     let result = run_command(&args);
     match result {
         Ok(text) => emit(out, &text),
@@ -188,29 +188,29 @@ extern "C" fn cmd_wechat(
 /// `/wechat login|start|stop|status` — synchronous; QR login runs bounded in
 /// this handler (poll loop with a 120 s cap) so the TUI gets one answer.
 fn run_command(args: &str) -> Result<String, String> {
-    let hub = hub()?;
+    let mesh = mesh()?;
     let sub = args.trim().to_ascii_lowercase();
-    let dir = hub.dir();
+    let dir = mesh.dir();
 
     // Bridge already running?
-    let running = hub.bridge_running();
+    let running = mesh.bridge_running();
 
     match sub.as_str() {
         "" | "status" => {
             let credentials = Credentials::load(&dir);
-            let holder = hub
+            let holder = mesh
                 .lease_owner
                 .holder("wechat")
                 .map_err(|e| e.to_string())?;
             Ok(format!(
                 "实例: {}\n凭据: {}\n桥: {}\n绑定用户: {}\n微信接管: {}\n禁用标志: {}",
-                hub.label(),
+                mesh.label(),
                 credentials
                     .as_ref()
                     .map(|c| format!("user={}", c.user_id))
                     .unwrap_or_else(|| "未登录（/wechat login）".into()),
                 if running { "运行中" } else { "停止" },
-                hub.user_id
+                mesh.user_id
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .clone()
@@ -229,24 +229,24 @@ fn run_command(args: &str) -> Result<String, String> {
             if running {
                 return Err("桥已在运行（先 /wechat stop）".into());
             }
-            hub.set_session_expired(false);
-            login_flow(&hub)
+            mesh.set_session_expired(false);
+            login_flow(&mesh)
         }
         "start" => {
             if state::is_disabled(&dir) {
                 state::set_disabled(&dir, false).map_err(|e| e.to_string())?;
             }
-            hub.set_session_expired(false);
+            mesh.set_session_expired(false);
             if running {
                 return Ok("桥已在运行".into());
             }
             let credentials = Credentials::load(&dir).ok_or("未登录：先 /wechat login 扫码绑定")?;
-            spawn_bridge(&hub, &credentials)?;
-            Ok(format!("微信桥已启动（{}）", hub.label()))
+            spawn_bridge(&mesh, &credentials)?;
+            Ok(format!("微信桥已启动（{}）", mesh.label()))
         }
         "stop" => {
             state::set_disabled(&dir, true).map_err(|e| e.to_string())?;
-            bridge::release_and_stop(&hub);
+            bridge::release_and_stop(&mesh);
             Ok("微信桥已停止（/wechat start 重新启动）".into())
         }
         other => Err(format!(
@@ -258,7 +258,7 @@ fn run_command(args: &str) -> Result<String, String> {
 /// QR login: fetch the code and render it immediately (synchronous, fast);
 /// confirmation polling runs on a background thread and auto-starts the
 /// bridge, reporting the result as a transcript notice.
-fn login_flow(hub: &Arc<Hub>) -> Result<String, String> {
+fn login_flow(mesh: &Arc<Channel>) -> Result<String, String> {
     let client = IlinkClient::new(crate::wechat::ilink::DEFAULT_BASE_URL, "").map_err(|e| e.to_string())?;
     let login_runtime = tokio_lite();
     let (qrcode, login_url) = login_runtime
@@ -267,7 +267,7 @@ fn login_flow(hub: &Arc<Hub>) -> Result<String, String> {
     let qr_ascii = crate::wechat::qr::render_terminal(&login_url).map_err(|e| e.to_string())?;
 
     // Poll on a detached thread; on success persist credentials + start.
-    let thread_hub = Arc::clone(&hub);
+    let thread_mesh = Arc::clone(&mesh);
     let thread_client = client.clone();
     let thread_qrcode = qrcode.clone();
     std::thread::Builder::new()
@@ -276,14 +276,14 @@ fn login_flow(hub: &Arc<Hub>) -> Result<String, String> {
             let runtime = tokio_lite();
             let deadline = std::time::Instant::now() + Duration::from_secs(180);
             loop {
-                if thread_hub.shutdown().requested() || std::time::Instant::now() >= deadline {
-                    let _ = thread_hub.notice("❌ 二维码超时未确认，重新 /wechat login");
+                if thread_mesh.shutdown().requested() || std::time::Instant::now() >= deadline {
+                    let _ = thread_mesh.notice("❌ 二维码超时未确认，重新 /wechat login");
                     return;
                 }
                 let status = match runtime.block_on(thread_client.qrcode_status(&thread_qrcode)) {
                     Ok(status) => status,
                     Err(error) => {
-                        thread_hub.record_error(format!("wechat login poll: {error}"));
+                        thread_mesh.record_error(format!("wechat login poll: {error}"));
                         std::thread::sleep(Duration::from_secs(2));
                         continue;
                     }
@@ -294,7 +294,7 @@ fn login_flow(hub: &Arc<Hub>) -> Result<String, String> {
                             token: match status.bot_token.clone() {
                                 Some(token) => token,
                                 None => {
-                                    thread_hub.record_error("wechat login: missing bot_token");
+                                    thread_mesh.record_error("wechat login: missing bot_token");
                                     return;
                                 }
                             },
@@ -305,26 +305,26 @@ fn login_flow(hub: &Arc<Hub>) -> Result<String, String> {
                             user_id: match status.user_id.clone() {
                                 Some(user) => user,
                                 None => {
-                                    thread_hub.record_error("wechat login: missing user_id");
+                                    thread_mesh.record_error("wechat login: missing user_id");
                                     return;
                                 }
                             },
                             saved_at: now_ms(),
                         };
-                        if let Err(error) = credentials.save(&thread_hub.dir()) {
-                            thread_hub.record_error(format!("wechat login: save failed: {error}"));
+                        if let Err(error) = credentials.save(&thread_mesh.dir()) {
+                            thread_mesh.record_error(format!("wechat login: save failed: {error}"));
                             return;
                         }
-                        match spawn_bridge(&thread_hub, &credentials) {
+                        match spawn_bridge(&thread_mesh, &credentials) {
                             Ok(()) => {
-                                let _ = thread_hub.notice(&format!(
+                                let _ = thread_mesh.notice(&format!(
                                     "✓ 微信已绑定 user={}，桥已启动（{}）",
                                     credentials.user_id,
-                                    thread_hub.label()
+                                    thread_mesh.label()
                                 ));
                             }
                             Err(error) => {
-                                let _ = thread_hub.notice(&format!(
+                                let _ = thread_mesh.notice(&format!(
                                     "✓ 已绑定 user={}，但桥启动失败: {error}",
                                     credentials.user_id
                                 ));
@@ -333,7 +333,7 @@ fn login_flow(hub: &Arc<Hub>) -> Result<String, String> {
                         return;
                     }
                     "expired" => {
-                        let _ = thread_hub.notice("❌ 二维码已过期，重新 /wechat login");
+                        let _ = thread_mesh.notice("❌ 二维码已过期，重新 /wechat login");
                         return;
                     }
                     _ => std::thread::sleep(Duration::from_secs(2)),
@@ -363,9 +363,9 @@ rpi_plugin_sdk::event_handler! {
         let Some(text) = assistant_text(&raw) else {
             return 0;
         };
-        if let Some(hub) = crate::wechat::hub::current() {
-            crate::wechat::hub::log(&format!("message_end: queueing reply ({} chars)", text.len()));
-            hub.queue_reply(&text);
+        if let Some(mesh) = crate::wechat::channel::current() {
+            crate::wechat::channel::log(&format!("message_end: queueing reply ({} chars)", text.len()));
+            mesh.queue_reply(&text);
         }
         0
     }
@@ -435,9 +435,9 @@ mod tests {
 ///   so retries would just churn the lease. `/wechat start|login` clears
 ///   the latch.
 /// Skipped entirely when the user explicitly disabled the bridge.
-pub fn spawn_watcher(hub: Arc<Hub>, credentials: Credentials) {
-    let thread_hub = Arc::clone(&hub);
-    let dir = thread_hub.dir().to_path_buf();
+pub fn spawn_watcher(mesh: Arc<Channel>, credentials: Credentials) {
+    let thread_mesh = Arc::clone(&mesh);
+    let dir = thread_mesh.dir().to_path_buf();
     std::thread::Builder::new()
         .name("rpi-wechat-watcher".into())
         .spawn(move || {
@@ -448,61 +448,61 @@ pub fn spawn_watcher(hub: Arc<Hub>, credentials: Credentials) {
             // ~0.5s of the /use hand-off; a fenced remote bridge flips the
             // footer to 🗨️ the moment its bridge thread exits.
             loop {
-                if thread_hub.shutdown().requested() || state::is_disabled(&dir) {
+                if thread_mesh.shutdown().requested() || state::is_disabled(&dir) {
                     return;
                 }
                 // Bridge already running in this process? The OwnerLoop
                 // owns the footer while we hold; just yield briefly.
-                if thread_hub.bridge_running() {
+                if thread_mesh.bridge_running() {
                     std::thread::sleep(Duration::from_millis(200));
                     continue;
                 }
-                if thread_hub.session_expired() {
+                if thread_mesh.session_expired() {
                     // Dead credentials: footer shows stopped, no claim churn.
-                    thread_hub.set_status(&rpi_mesh_core::status::status_stopped("登录过期"));
+                    thread_mesh.set_status(&rpi_mesh_core::status::status_stopped("登录过期"));
                     std::thread::sleep(Duration::from_millis(200));
                     continue;
                 }
                 let now = rpi_mesh_core::now_ms();
-                match thread_hub.lease_owner.holder("wechat") {
+                match thread_mesh.lease_owner.holder("wechat") {
                     Ok(Some(holder)) => {
-                        let owner_present = thread_hub
+                        let owner_present = thread_mesh
                             .store()
                             .get_instance_alive(&holder.owner_node)
                             .ok()
                             .flatten()
                             .is_some();
-                        let ours = holder.owner_node == thread_hub.node_id();
+                        let ours = holder.owner_node == thread_mesh.node_id();
                         let recently_renewed = now - holder.updated_at < 30_000;
                         let unattended =
                             !owner_present || (holder.expires_at <= now && !recently_renewed);
                         if ours && unattended && holder.expires_at <= now {
                             // Our own stale row (owner loop died): take it
                             // back via the normal claim path.
-                            start_from_watcher(&thread_hub, &credentials);
+                            start_from_watcher(&thread_mesh, &credentials);
                         } else if !ours && unattended {
-                            crate::wechat::hub::log(&format!(
+                            crate::wechat::channel::log(&format!(
                                 "watcher: wechat unattended (owner {} gone/expired) — taking over",
                                 holder.full_name()
                             ));
-                            start_from_watcher(&thread_hub, &credentials);
+                            start_from_watcher(&thread_mesh, &credentials);
                         } else if !ours {
                             // Held elsewhere and alive: footer from facts.
-                            thread_hub.set_status(&rpi_mesh_core::status::status_remote(
+                            thread_mesh.set_status(&rpi_mesh_core::status::status_remote(
                                 &holder.full_name(),
                             ));
                         } else {
                             // Ours but the bridge is not running and the lease
                             // is healthy: start the bridge to match the lease.
-                            start_from_watcher(&thread_hub, &credentials);
+                            start_from_watcher(&thread_mesh, &credentials);
                         }
                     }
                     Ok(None) => {
                         // No lease row: the channel is free.
-                        start_from_watcher(&thread_hub, &credentials);
+                        start_from_watcher(&thread_mesh, &credentials);
                     }
                     Err(error) => {
-                        crate::wechat::hub::log(&format!("watcher: lease read failed: {error}"));
+                        crate::wechat::channel::log(&format!("watcher: lease read failed: {error}"));
                     }
                 }
                 std::thread::sleep(Duration::from_millis(200));
@@ -513,15 +513,15 @@ pub fn spawn_watcher(hub: Arc<Hub>, credentials: Credentials) {
 
 /// Claim + start the bridge from the watcher; log failures and surface the
 /// remote-holder footer on a race loss.
-fn start_from_watcher(hub: &Arc<Hub>, credentials: &Credentials) {
-    match spawn_bridge_public(hub, credentials) {
-        Ok(()) => crate::wechat::hub::log("watcher: took over the wechat channel"),
+fn start_from_watcher(mesh: &Arc<Channel>, credentials: &Credentials) {
+    match spawn_bridge_public(mesh, credentials) {
+        Ok(()) => crate::wechat::channel::log("watcher: took over the wechat channel"),
         Err(error) => {
-            crate::wechat::hub::log(&format!("watcher: bridge start failed: {error}"));
+            crate::wechat::channel::log(&format!("watcher: bridge start failed: {error}"));
             // The claim inside spawn_bridge may have raced a holder; show it.
-            if let Ok(Some(holder)) = hub.lease_owner.holder("wechat") {
-                if holder.owner_node != hub.node_id() {
-                    hub.set_status(&rpi_mesh_core::status::status_remote(&holder.full_name()));
+            if let Ok(Some(holder)) = mesh.lease_owner.holder("wechat") {
+                if holder.owner_node != mesh.node_id() {
+                    mesh.set_status(&rpi_mesh_core::status::status_remote(&holder.full_name()));
                 }
             }
         }

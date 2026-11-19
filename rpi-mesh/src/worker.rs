@@ -1,4 +1,4 @@
-//! The hub worker: one thread per plugin load.
+//! The mesh worker: one thread per plugin load.
 //!
 //! It owns everything periodic — presence heartbeat, mailbox dispatch, lease
 //! renewal, housekeeping — so event handlers and TUI command handlers stay
@@ -12,30 +12,30 @@ use rpi_mesh_core::protocol::{Envelope, EnvelopeKind};
 use rpi_mesh_core::store::Heartbeat;
 use rpi_plugin_sdk::RuntimeActionId;
 
-use crate::hub::{self, Hub, ALIVE_MS};
+use crate::mesh::{self, Mesh, ALIVE_MS};
 use crate::intent;
 const HEARTBEAT: Duration = Duration::from_secs(3);
 const DISPATCH: Duration = Duration::from_millis(300);
 const CONTEXT: Duration = Duration::from_secs(15);
 const PRUNE: Duration = Duration::from_secs(60);
 
-pub fn run(hub: Arc<Hub>) {
-    if let Err(error) = register(&hub) {
-        hub.record_error(format!("cannot register instance: {error}"));
+pub fn run(mesh: Arc<Mesh>) {
+    if let Err(error) = register(&mesh) {
+        mesh.record_error(format!("cannot register instance: {error}"));
         return;
     }
-    // The hub slot identifies THIS instance and the relay mode. Local mode
+    // The mesh slot identifies THIS instance and the relay mode. Local mode
     // shows just the full name (instance count carries no actionable info);
     // relay/client append the mode, since cross-machine behavior changes.
-    // 💻 marks the hub (compute node); 📡 marks cross-machine mode — a relay
+    // 💻 marks the mesh (compute node); 📡 marks cross-machine mode — a relay
     // serves other nodes, a client reaches a remote one. Local mode shows
     // just 💻 + identity (no cross-machine fact to announce).
-    let mode_glyph = match hub.config.remote.mode {
+    let mode_glyph = match mesh.config.remote.mode {
         rpi_mesh_core::config::RemoteMode::Relay => "📡️",
         rpi_mesh_core::config::RemoteMode::Client => "💻",
         rpi_mesh_core::config::RemoteMode::Local => "🏠",
     };
-    hub.set_status(&format!("{} {mode_glyph}", hub.label()));
+    mesh.set_status(&format!("{} {mode_glyph}", mesh.label()));
 
     let mut next_beat = Instant::now();
     let mut next_dispatch = Instant::now();
@@ -43,65 +43,65 @@ pub fn run(hub: Arc<Hub>) {
     let mut next_prune = Instant::now() + PRUNE;
 
     loop {
-        if hub.shutdown().requested() {
+        if mesh.shutdown().requested() {
             break;
         }
         let now = Instant::now();
         if now >= next_context {
-            refresh_context(&hub);
+            refresh_context(&mesh);
             next_context = now + CONTEXT;
         }
         if now >= next_beat {
-            if !heartbeat(&hub) {
+            if !heartbeat(&mesh) {
                 // The epoch is stale: a `/reload` replaced this plugin load.
-                hub::log("worker stopping: presence epoch superseded");
+                mesh::log("worker stopping: presence epoch superseded");
                 break;
             }
             next_beat = now + HEARTBEAT;
         }
         if now >= next_dispatch {
-            dispatch(&hub);
+            dispatch(&mesh);
             next_dispatch = now + DISPATCH;
         }
         if now >= next_prune {
-            housekeeping(&hub);
+            housekeeping(&mesh);
             next_prune = now + PRUNE;
         }
-        hub.shutdown().wait(DISPATCH);
+        mesh.shutdown().wait(DISPATCH);
     }
 
-    let _ = hub.store.unregister_instance(&hub.node_id, &hub.epoch);
-    hub.set_status("");
+    let _ = mesh.store.unregister_instance(&mesh.node_id, &mesh.epoch);
+    mesh.set_status("");
 }
 
-fn register(hub: &Arc<Hub>) -> Result<(), String> {
+fn register(mesh: &Arc<Mesh>) -> Result<(), String> {
     // The register phase already announced us; keep the retry loop for the
     // case where that attempt hit a busy database.
-    if hub.registered() {
+    if mesh.registered() {
         return Ok(());
     }
     loop {
-        if hub.shutdown().requested() {
+        if mesh.shutdown().requested() {
             return Err("shutdown requested".into());
         }
-        match hub.register_presence() {
+        match mesh.register_presence() {
             Ok(()) => return Ok(()),
             Err(error) => {
-                if hub.shutdown().requested() {
+                if mesh.shutdown().requested() {
                     return Err(error.to_string());
                 }
-                hub::log(&format!("register retry: {error}"));
-                hub.shutdown().wait(Duration::from_secs(1));
+                mesh::log(&format!("register retry: {error}"));
+                mesh.shutdown().wait(Duration::from_secs(1));
             }
         }
     }
 }
 
-fn refresh_context(hub: &Arc<Hub>) {
-    let Ok(result) = hub.action(RuntimeActionId::GetExecutionContext, serde_json::json!({})) else {
+fn refresh_context(mesh: &Arc<Mesh>) {
+    let Ok(result) = mesh.action(RuntimeActionId::GetExecutionContext, serde_json::json!({})) else {
         return;
     };
-    let mut snapshot = hub.session_snapshot();
+    let mut snapshot = mesh.session_snapshot();
     if let Some(session) = result.get("sessionId").and_then(|v| v.as_str()) {
         snapshot.session_id = Some(session.to_string());
     }
@@ -111,33 +111,33 @@ fn refresh_context(hub: &Arc<Hub>) {
     if let Some(cwd) = result.get("cwd").and_then(|v| v.as_str()) {
         snapshot.cwd = Some(cwd.to_string());
     }
-    hub.update_sessions(snapshot);
+    mesh.update_sessions(snapshot);
 }
 
-fn heartbeat(hub: &Arc<Hub>) -> bool {
+fn heartbeat(mesh: &Arc<Mesh>) -> bool {
     let now = now_ms();
-    let snapshot = hub.session_snapshot();
+    let snapshot = mesh.session_snapshot();
     let beat = Heartbeat {
-        busy: hub.busy(),
+        busy: mesh.busy(),
         session_id: snapshot.session_id,
         title: None,
         model: snapshot.model,
     };
-    match hub.store.heartbeat(&hub.node_id, &hub.epoch, now, &beat) {
+    match mesh.store.heartbeat(&mesh.node_id, &mesh.epoch, now, &beat) {
         Ok(alive) => alive,
         Err(error) => {
-            hub::log(&format!("heartbeat failed: {error}"));
+            mesh::log(&format!("heartbeat failed: {error}"));
             true
         }
     }
 }
 
-fn dispatch(hub: &Arc<Hub>) {
+fn dispatch(mesh: &Arc<Mesh>) {
     let now = now_ms();
-    let envelopes = match hub.store.inbox(&hub.node_id, now, hub.inbox_batch()) {
+    let envelopes = match mesh.store.inbox(&mesh.node_id, now, mesh.inbox_batch()) {
         Ok(envelopes) => envelopes,
         Err(error) => {
-            hub.record_error(format!("mailbox read failed: {error}"));
+            mesh.record_error(format!("mailbox read failed: {error}"));
             return;
         }
     };
@@ -149,38 +149,38 @@ fn dispatch(hub: &Arc<Hub>) {
                 .as_ref()
                 .is_some_and(|command| command.name == "reload")
         {
-            let _ = hub.store.ack_envelope(&envelope.id, &hub.node_id, now_ms());
-            reply(hub, &envelope, true, "reloading…".to_string());
-            hub::log("reloading on request");
-            let _ = hub.action(RuntimeActionId::Reload, serde_json::json!({}));
-            hub.request_shutdown();
+            let _ = mesh.store.ack_envelope(&envelope.id, &mesh.node_id, now_ms());
+            reply(mesh, &envelope, true, "reloading…".to_string());
+            mesh::log("reloading on request");
+            let _ = mesh.action(RuntimeActionId::Reload, serde_json::json!({}));
+            mesh.request_shutdown();
             return;
         }
 
         match envelope.kind {
-            EnvelopeKind::Text => handle_text(hub, &envelope),
-            EnvelopeKind::Cmd => handle_command(hub, &envelope),
-            EnvelopeKind::Reply => handle_reply(hub, &envelope),
+            EnvelopeKind::Text => handle_text(mesh, &envelope),
+            EnvelopeKind::Cmd => handle_command(mesh, &envelope),
+            EnvelopeKind::Reply => handle_reply(mesh, &envelope),
             EnvelopeKind::Notice => {
                 let text = envelope.text.clone().unwrap_or_default();
-                let _ = hub.notice(&format!("{}: {text}", envelope.from_name));
+                let _ = mesh.notice(&format!("{}: {text}", envelope.from_name));
             }
-            EnvelopeKind::Assign => handle_assign(hub, &envelope, true),
-            EnvelopeKind::Unassign => handle_assign(hub, &envelope, false),
+            EnvelopeKind::Assign => handle_assign(mesh, &envelope, true),
+            EnvelopeKind::Unassign => handle_assign(mesh, &envelope, false),
         }
-        if let Err(error) = hub.store.ack_envelope(&envelope.id, &hub.node_id, now_ms()) {
-            hub::log(&format!("ack failed: {error}"));
+        if let Err(error) = mesh.store.ack_envelope(&envelope.id, &mesh.node_id, now_ms()) {
+            mesh::log(&format!("ack failed: {error}"));
         }
     }
 }
 
-fn handle_text(hub: &Arc<Hub>, envelope: &Envelope) {
+fn handle_text(mesh: &Arc<Mesh>, envelope: &Envelope) {
     let text = envelope.text.clone().unwrap_or_default();
     // Make the incoming /msg visible in the target transcript: steer messages
     // ride the agent queue (and may wait behind the active turn), which read
     // as "nothing happened" in the target window. A display-only notice gives
     // immediate, model-free visibility.
-    let _ = hub.notice(&format!("📨 {}: {}", envelope.from_name, text));
+    let _ = mesh.notice(&format!("📨 {}: {}", envelope.from_name, text));
 
     // Correlated asks use the host's SYNCHRONOUS run outcome instead of the
     // pending-queue + MessageEnd guessing: `SendUserMessage` blocks until the
@@ -193,8 +193,8 @@ fn handle_text(hub: &Arc<Hub>, envelope: &Envelope) {
     // is the only mailbox drainer anyway — dispatch() is sequential by
     // design, and a concurrent /msg to this instance just queues behind.
     if envelope.correlation.is_some() {
-        let _ = hub.notice("（ask 任务已开始，回复会自动传回发起方）");
-        match hub.send_user_message_outcome(&text, Some("steer")) {
+        let _ = mesh.notice("（ask 任务已开始，回复会自动传回发起方）");
+        match mesh.send_user_message_outcome(&text, Some("steer")) {
             Ok(outcome) => {
                 let status = outcome.get("status").and_then(|v| v.as_str()).unwrap_or("");
                 match status {
@@ -204,7 +204,7 @@ fn handle_text(hub: &Arc<Hub>, envelope: &Envelope) {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        reply(hub, envelope, true, text);
+                        reply(mesh, envelope, true, text);
                     }
                     "aborted" | "error" => {
                         let reason = outcome
@@ -213,7 +213,7 @@ fn handle_text(hub: &Arc<Hub>, envelope: &Envelope) {
                             .or_else(|| outcome.get("status").and_then(|v| v.as_str()))
                             .unwrap_or("unknown")
                             .to_string();
-                        reply(hub, envelope, false, format!("目标回合异常结束: {reason}"));
+                        reply(mesh, envelope, false, format!("目标回合异常结束: {reason}"));
                     }
                     // Queued behind an active run / appended without a run:
                     // the host gives no completion signal we could wait on.
@@ -225,7 +225,7 @@ fn handle_text(hub: &Arc<Hub>, envelope: &Envelope) {
                             format!("（宿主状态: {other}）")
                         };
                         reply(
-                            hub,
+                            mesh,
                             envelope,
                             false,
                             format!("目标正忙，消息已排队而非立即执行{}；请稍后重发", detail),
@@ -234,37 +234,37 @@ fn handle_text(hub: &Arc<Hub>, envelope: &Envelope) {
                 }
             }
             Err(error) => {
-                reply(hub, envelope, false, format!("投递失败: {error}"));
+                reply(mesh, envelope, false, format!("投递失败: {error}"));
             }
         }
         return;
     }
 
     // Plain /msg: fire-and-forget, never blocks the mailbox on a run.
-    if let Err(error) = hub.send_user_message(&text, Some("steer")) {
-        hub.record_error(format!("cannot deliver message: {error}"));
-        reply(hub, envelope, false, format!("投递失败: {error}"));
+    if let Err(error) = mesh.send_user_message(&text, Some("steer")) {
+        mesh.record_error(format!("cannot deliver message: {error}"));
+        reply(mesh, envelope, false, format!("投递失败: {error}"));
     }
 }
 
-fn handle_command(hub: &Arc<Hub>, envelope: &Envelope) {
+fn handle_command(mesh: &Arc<Mesh>, envelope: &Envelope) {
     let Some(command) = envelope.command.clone() else {
-        reply(hub, envelope, false, "空指令".into());
+        reply(mesh, envelope, false, "空指令".into());
         return;
     };
-    match intent::execute(hub, &command) {
-        Ok(text) => reply(hub, envelope, true, text),
-        Err(error) => reply(hub, envelope, false, error),
+    match intent::execute(mesh, &command) {
+        Ok(text) => reply(mesh, envelope, true, text),
+        Err(error) => reply(mesh, envelope, false, error),
     }
 }
 
 /// `assign`/`unassign` envelopes from the LeaseAdmin path (`/use`, phone
-/// `/use N`, hub_switch): display the hand-off as a transcript notice.
+/// `/use N`, mesh_switch): display the hand-off as a transcript notice.
 /// (No cross-plugin wake-up here: the two dylibs static-link their own copy
 /// of any process-global, so a signal from this crate would never reach the
 /// wechat plugin's threads. The OwnerLoop/watcher poll the lease row every
 /// 200ms instead — sub-second, simple, honest.)
-fn handle_assign(hub: &Arc<Hub>, envelope: &Envelope, assigned: bool) {
+fn handle_assign(mesh: &Arc<Mesh>, envelope: &Envelope, assigned: bool) {
     // The envelope text already carries the user-facing sentence ("wechat
     // 已交给你…" / "…已移交 <新持有者>…"); show it verbatim instead of
     // recomposing from fields (the old code displayed the SENDER —
@@ -280,70 +280,70 @@ fn handle_assign(hub: &Arc<Hub>, envelope: &Envelope, assigned: bool) {
     } else {
         text
     };
-    let _ = hub.notice(&text);
+    let _ = mesh.notice(&text);
 }
 
-fn handle_reply(hub: &Arc<Hub>, envelope: &Envelope) {
+fn handle_reply(mesh: &Arc<Mesh>, envelope: &Envelope) {
     let Some(correlation) = envelope.correlation.clone() else {
         return;
     };
     let ok = envelope.ok.unwrap_or(true);
     let text = envelope.text.clone().unwrap_or_default();
-    let outcome = hub::ReplyOutcome {
+    let outcome = mesh::ReplyOutcome {
         ok,
         text: text.clone(),
         at: now_ms(),
     };
-    if hub.answer_reply(&correlation, outcome) {
+    if mesh.answer_reply(&correlation, outcome) {
         return;
     }
     // Nobody is waiting (the asker may have restarted): surface it instead of
     // dropping the result on the floor.
-    let _ = hub.notice(&format!(
+    let _ = mesh.notice(&format!(
         "来自 {} 的结果:\n{}",
         envelope.from_name,
         if text.is_empty() { "(空)" } else { &text }
     ));
 }
 
-fn reply(hub: &Arc<Hub>, envelope: &Envelope, ok: bool, text: String) {
+fn reply(mesh: &Arc<Mesh>, envelope: &Envelope, ok: bool, text: String) {
     let Some(correlation) = envelope.correlation.clone() else {
         // Uncorrelated command: report through the local transcript.
-        let _ = hub.notice(&format!("{} {}", if ok { "✓" } else { "✗" }, text));
+        let _ = mesh.notice(&format!("{} {}", if ok { "✓" } else { "✗" }, text));
         return;
     };
     let reply = Envelope::reply(
-        &hub.node_id,
-        &hub.name(),
+        &mesh.node_id,
+        &mesh.name(),
         &envelope.from_node,
         correlation,
         text,
         ok,
         now_ms(),
     );
-    if let Err(error) = hub.store.send_envelope(&reply) {
-        hub::log(&format!("reply delivery failed: {error}"));
+    if let Err(error) = mesh.store.send_envelope(&reply) {
+        mesh::log(&format!("reply delivery failed: {error}"));
     }
 }
 
-fn housekeeping(hub: &Arc<Hub>) {
+fn housekeeping(mesh: &Arc<Mesh>) {
     // Same-host dead pids go first: a C-c'd process must stop gating the
     // dead-owner lease takeover for the rest of the heartbeat window.
-    if let Ok(dropped) = hub.store.reap_dead_local_instances() {
+    if let Ok(dropped) = mesh.store.reap_dead_local_instances() {
         if dropped > 0 {
-            hub::log(&format!("reaped {dropped} dead local presence rows"));
+            mesh::log(&format!("reaped {dropped} dead local presence rows"));
         }
     }
-    match hub.store.prune(now_ms(), ALIVE_MS) {
+    match mesh.store.prune(now_ms(), ALIVE_MS) {
         Ok(report) => {
             if report.instances + report.envelopes + report.seen > 0 {
-                hub::log(&format!(
+                mesh::log(&format!(
                     "pruned {} instances, {} envelopes, {} seen ids",
                     report.instances, report.envelopes, report.seen
                 ));
             }
         }
-        Err(error) => hub::log(&format!("prune failed: {error}")),
+        Err(error) => mesh::log(&format!("prune failed: {error}")),
     }
 }
 
@@ -354,25 +354,25 @@ fn housekeeping(hub: &Arc<Hub>) {
 /// Stop accepting work. Must not block or join: the host calls it from a
 /// blocking thread while our FFI calls may still be in flight.
 pub extern "C" fn begin_shutdown(_user_data: *mut std::ffi::c_void) {
-    if let Some(hub) = hub::current() {
-        hub.request_shutdown();
+    if let Some(mesh) = mesh::current() {
+        mesh.request_shutdown();
     }
 }
 
 /// Join the worker. Returning nonzero makes the host keep the library mapped
 /// forever, so only do that when the worker really could not be stopped.
 pub extern "C" fn finish_shutdown(_user_data: *mut std::ffi::c_void) -> i32 {
-    let Some(hub) = hub::current() else {
+    let Some(mesh) = mesh::current() else {
         return 0;
     };
-    hub.request_shutdown();
-    hub.stop_worker();
-    let _ = hub.store.unregister_instance(&hub.node_id, &hub.epoch);
-    hub.stop_backends();
-    let _ = hub.action(
+    mesh.request_shutdown();
+    mesh.stop_worker();
+    let _ = mesh.store.unregister_instance(&mesh.node_id, &mesh.epoch);
+    mesh.stop_backends();
+    let _ = mesh.action(
         RuntimeActionId::SetStatus,
-        serde_json::json!({ "key": "hub", "value": "" }),
+        serde_json::json!({ "key": "mesh", "value": "" }),
     );
-    hub::clear_current();
+    mesh::clear_current();
     0
 }

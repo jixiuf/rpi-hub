@@ -108,14 +108,14 @@ EOF
 cat >"$WORK/remote-start.sh" <<EOF
 #!/bin/sh
 # Hold stdin open so rpc mode keeps serving instead of exiting on EOF.
-export RPI_HUB_DIR="$REMOTE_HUB"
+export RPI_MESH_DIR="$REMOTE_HUB"
 sleep 600 | exec "$REMOTE_RPI" --local-only --extensions-dir "$REMOTE_EXT" \\
   --mode rpc --session-dir "/tmp/$SESSION" \\
   --api-key smoke --base-url http://127.0.0.1:1
 EOF
 scp -q -o BatchMode=yes "$WORK/remote-start.sh" "$HOST:$REMOTE_START"
 # tmux does not forward inline env assignments, so the start script owns
-# RPI_HUB_DIR (exported inside) and the absolute rpi path.
+# RPI_MESH_DIR (exported inside) and the absolute rpi path.
 "${SSH[@]}" "chmod +x $REMOTE_START && tmux kill-session -t $SESSION 2>/dev/null; tmux new-session -d -s $SESSION 'sh $REMOTE_START > $REMOTE_OUT 2>&1'"
 
 # Relay readiness = the TCP port answers.
@@ -132,7 +132,7 @@ if ! "${SSH[@]}" "test -f $HUB_TOKEN"; then
   "${SSH[@]}" "tail -5 $REMOTE_OUT; echo ---; ls -la $REMOTE_HUB; echo ---; pgrep -af rpi | head -3" >&2 || true
   exit 1
 fi
-relay_log="$("${SSH[@]}" "cat $REMOTE_HUB/logs/hub.log 2>/dev/null" || true)"
+relay_log="$("${SSH[@]}" "cat $REMOTE_HUB/logs/mesh.log 2>/dev/null" || true)"
 if ! grep -q "registered $RELAY_NAME" <<<"$relay_log"; then
   echo "FAIL: relay did not register as $RELAY_NAME" >&2
   echo "$relay_log" >&2
@@ -155,7 +155,7 @@ cat >"$WORK/local/config.json" <<EOF
   }
 }
 EOF
-RPI_HUB_DIR="$WORK/local" "$LOCAL_RPI" --local-only --extensions-dir "$HERE/target/debug" \
+RPI_MESH_DIR="$WORK/local" "$LOCAL_RPI" --local-only --extensions-dir "$HERE/target/debug" \
   --mode rpc --session-dir "$WORK/sessions" --api-key smoke --base-url http://127.0.0.1:1 \
   <"$WORK/in" >"$WORK/out" 2>&1 &
 PIDS+=("$!")
@@ -216,7 +216,7 @@ echo "lease handoff to $remote_bare: ok"
 # 3. the relay's own database agrees
 "${SSH[@]}" "python3 - <<'PY'
 import sqlite3, sys
-rows = sqlite3.connect('$REMOTE_HUB/hub.db').execute(
+rows = sqlite3.connect('$REMOTE_HUB/mesh.db').execute(
     'select owner_name from leases where capability=\"wechat\"').fetchall()
 sys.exit(0 if rows and rows[0][0] == '$remote_bare' else 1)
 PY" || {

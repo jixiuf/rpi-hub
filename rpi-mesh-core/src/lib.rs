@@ -1,13 +1,13 @@
-//! Shared core for the rpi-hub plugins.
+//! Shared core for the rpi-mesh plugins.
 //!
-//! The hub is deliberately **not** a daemon and not a socket protocol in the
+//! The mesh is deliberately **not** a daemon and not a socket protocol in the
 //! local case: every rpi process opens the same SQLite database (WAL mode), so
 //! presence, mailbox and the channel lease are just rows with SQLite's own
 //! multi-process safety. Cross-machine nodes go through a relay that owns the
 //! same database, reached over a plugin-managed SSH stream-local tunnel.
 //!
 //! Layering:
-//! - [`config`]  — `~/.rpi/agent/pi-hub/config.json` (env overrides)
+//! - [`config`]  — `~/.rpi/agent/pi-mesh/config.json` (env overrides)
 //! - [`paths`]   — where state lives, with permissions
 //! - [`names`]   — instance identity/naming rules
 //! - [`protocol`]— envelopes and command intents (the wire format)
@@ -26,8 +26,8 @@ pub mod status;
 pub mod store;
 pub mod wire;
 
-pub use api::HubStore;
-pub use error::{HubError, Result};
+pub use api::MeshStore;
+pub use error::{MeshError, Result};
 
 /// Milliseconds since the Unix epoch, saturating at `i64::MAX`.
 pub fn now_ms() -> i64 {

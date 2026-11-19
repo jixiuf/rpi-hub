@@ -519,7 +519,7 @@ fn v1_database_migrates_to_v2_and_carries_channel_state() {
 
     // Hand-build a v1 database (leases without state_json).
     {
-        let conn = rusqlite::Connection::open(path.join("hub.db")).unwrap();
+        let conn = rusqlite::Connection::open(path.join("mesh.db")).unwrap();
         conn.execute_batch(
             "CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE instances (node_id TEXT PRIMARY KEY, name TEXT NOT NULL, host TEXT NOT NULL,

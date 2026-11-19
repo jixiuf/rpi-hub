@@ -1,7 +1,7 @@
 //! The WeChat plugin's own host state.
 //!
-//! Deliberately separate from rpi-hub's `Hub`: this crate must work even when
-//! the rpi-hub plugin is absent (the lease store is the coordination point),
+//! Deliberately separate from rpi-mesh's `Channel`: this crate must work even when
+//! the rpi-mesh plugin is absent (the lease store is the coordination point),
 //! and it must not share mutable state with another plugin's statics. Both
 //! plugins open the same SQLite database; the lease is the arbiter.
 
@@ -14,17 +14,17 @@ use rpi_mesh_core::paths;
 use rpi_mesh_core::store::Claim;
 use rpi_plugin_sdk::{RuntimeActionFn, RuntimeActionId};
 
-/// Alive window for presence rows (mirrors rpi-hub).
+/// Alive window for presence rows (mirrors rpi-mesh).
 pub const ALIVE_MS: i64 = 30_000;
 
-static CURRENT: OnceLock<Mutex<Option<Arc<Hub>>>> = OnceLock::new();
+static CURRENT: OnceLock<Mutex<Option<Arc<Channel>>>> = OnceLock::new();
 
-fn cell() -> &'static Mutex<Option<Arc<Hub>>> {
+fn cell() -> &'static Mutex<Option<Arc<Channel>>> {
     CURRENT.get_or_init(|| Mutex::new(None))
 }
 
-/// The hub for the currently loaded plugin instance, if any.
-pub fn current() -> Option<Arc<Hub>> {
+/// The mesh for the currently loaded plugin instance, if any.
+pub fn current() -> Option<Arc<Channel>> {
     cell().lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
@@ -35,10 +35,10 @@ pub fn clear_current() {
 /// Append a line to `logs/wechat.log` (5 MB rotation).
 pub fn log(message: &str) {
     let line = format!("{} [{}] {message}\n", now_ms(), std::process::id());
-    if std::env::var("RPI_HUB_DEBUG").ok().as_deref() == Some("1") {
+    if std::env::var("RPI_MESH_DEBUG").ok().as_deref() == Some("1") {
         eprint!("rpi-wechat: {line}");
     }
-    let Ok(dir) = paths::hub_dir() else {
+    let Ok(dir) = paths::mesh_dir() else {
         return;
     };
     let dir = paths::log_dir(&dir);
@@ -66,12 +66,12 @@ pub struct HeldLease {
 }
 
 
-pub struct Hub {
+pub struct Channel {
     /// The process-wide mesh state (identity, store, config, runtime bridge).
     /// The old double-dylib design built a SECOND node_id/epoch/store here;
     /// in the unified plugin there is exactly one identity, so the channel
-    /// borrows the mesh hub instead of duplicating it.
-    pub mesh: Arc<crate::hub::Hub>,
+    /// borrows the mesh mesh instead of duplicating it.
+    pub mesh: Arc<crate::mesh::Mesh>,
     /// The wechat lease held by this instance (generation bookkeeping; the
     /// claim / renew / release calls themselves go through `lease_owner`).
     /// Written by the OwnerLoop and the claim paths only.
@@ -111,23 +111,23 @@ pub struct Hub {
     owner_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
-impl std::fmt::Debug for Hub {
+impl std::fmt::Debug for Channel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Hub")
+        f.debug_struct("Channel")
             .field("mesh", &self.mesh.dir())
             .field("node_id", &self.mesh.node_id)
             .finish()
     }
 }
 
-impl Hub {
-    /// Wrap the process-wide mesh hub. The channel adds only its own
+impl Channel {
+    /// Wrap the process-wide mesh mesh. The channel adds only its own
     /// bookkeeping (lease slot, owner loop handle, credentials, context
     /// token, degraded/alive flags). Identity, store and config all come
     /// from the mesh — one node_id, one epoch, one presence row per process.
-    pub fn new(mesh: Arc<crate::hub::Hub>) -> Arc<Self> {
+    pub fn new(mesh: Arc<crate::mesh::Mesh>) -> Arc<Self> {
         let lease_owner = rpi_mesh_core::lease::LeaseOwner::new(
-            Arc::clone(&mesh.store) as Arc<dyn rpi_mesh_core::api::HubStore>,
+            Arc::clone(&mesh.store) as Arc<dyn rpi_mesh_core::api::MeshStore>,
             mesh.node_id.clone(),
             mesh.name(),
             mesh.config.lease.ttl_ms(),
@@ -169,16 +169,16 @@ impl Hub {
     pub fn epoch(&self) -> &str {
         &self.mesh.epoch
     }
-    pub fn config(&self) -> &rpi_mesh_core::config::HubConfig {
+    pub fn config(&self) -> &rpi_mesh_core::config::MeshConfig {
         &self.mesh.config
     }
-    pub fn store(&self) -> Arc<dyn rpi_mesh_core::api::HubStore> {
-        Arc::clone(&self.mesh.store) as Arc<dyn rpi_mesh_core::api::HubStore>
+    pub fn store(&self) -> Arc<dyn rpi_mesh_core::api::MeshStore> {
+        Arc::clone(&self.mesh.store) as Arc<dyn rpi_mesh_core::api::MeshStore>
     }
     pub fn busy(&self) -> bool {
         self.mesh.busy()
     }
-    pub fn shutdown(&self) -> &crate::hub::Shutdown {
+    pub fn shutdown(&self) -> &crate::mesh::Shutdown {
         self.mesh.shutdown()
     }
     pub fn request_shutdown(&self) {
@@ -459,9 +459,9 @@ impl Hub {
 }
 
 
-/// Best-effort hostname (mirrors rpi-hub's detection).
+/// Best-effort hostname (mirrors rpi-mesh's detection).
 pub fn detect_host() -> String {
-    for key in ["RPI_HUB_HOST", "HOSTNAME", "HOST", "COMPUTERNAME"] {
+    for key in ["RPI_MESH_HOST", "HOSTNAME", "HOST", "COMPUTERNAME"] {
         if let Ok(value) = std::env::var(key) {
             let value = value.trim();
             if !value.is_empty() {

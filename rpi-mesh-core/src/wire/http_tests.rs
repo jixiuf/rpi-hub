@@ -1,7 +1,7 @@
-//! HTTP-smuggling mode: one RPC per POST /hub-rpc, token in X-Hub-Auth.
+//! HTTP-smuggling mode: one RPC per POST /mesh-rpc, token in X-Mesh-Auth.
 
 use super::{serve, Endpoint, RemoteStore, Token};
-use crate::api::HubStore;
+use crate::api::MeshStore;
 use crate::protocol::Envelope;
 use crate::store::{Claim, Store};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -14,7 +14,7 @@ const TOKEN_HEX: &str = "ef1234abcd567890ef1234abcd567890";
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "rpi-hub-http-{name}-{}-{}",
+        "rpi-mesh-http-{name}-{}-{}",
         std::process::id(),
         crate::now_ms()
     ));
@@ -28,9 +28,6 @@ fn start_http_relay(dir: &PathBuf, port: u16) -> (Arc<AtomicBool>, std::thread::
     let endpoint = Endpoint::Tcp("127.0.0.1".into(), port);
     let token = Token::from_hex(TOKEN_HEX).unwrap();
     std::fs::write(dir.join("relay-token"), format!("{TOKEN_HEX}\n")).unwrap();
-    // serve() picks the token file from RPI_HUB_TOKEN_FILE when set, so the
-    // test's token is authoritative instead of ~/.rpi/agent/pi-hub/relay-token.
-    std::env::set_var("RPI_HUB_TOKEN_FILE", dir.join("relay-token"));
     let stop = Arc::new(AtomicBool::new(false));
     let handle = {
         let endpoint = endpoint.clone();
@@ -51,7 +48,7 @@ fn post(port: u16, path: &str, auth: Option<&str>, body: &str) -> (u16, Vec<u8>)
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     let auth_line = auth
-        .map(|token| format!("X-Hub-Auth: {token}\r\n"))
+        .map(|token| format!("X-Mesh-Auth: {token}\r\n"))
         .unwrap_or_default();
     let head = format!(
         "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth_line}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -114,10 +111,10 @@ fn http_mode_round_trips_and_enforces_auth() {
     .to_string();
 
     // No token -> 401.
-    let (status, _) = post(port, "/hub-rpc", None, &list_body);
+    let (status, _) = post(port, "/mesh-rpc", None, &list_body);
     assert_eq!(status, 401);
     // Wrong token -> 401.
-    let (status, _) = post(port, "/hub-rpc", Some(&"0".repeat(32)), &list_body);
+    let (status, _) = post(port, "/mesh-rpc", Some(&"0".repeat(32)), &list_body);
     assert_eq!(status, 401);
     // Unknown path -> 404 (the real service on a shared port is untouched).
     let (status, body) = post(port, "/metrics", Some(TOKEN_HEX), &list_body);
@@ -125,7 +122,7 @@ fn http_mode_round_trips_and_enforces_auth() {
     assert_eq!(body, b"not found");
 
     // Correct token -> full RPC.
-    let (status, body) = post(port, "/hub-rpc", Some(TOKEN_HEX), &list_body);
+    let (status, body) = post(port, "/mesh-rpc", Some(TOKEN_HEX), &list_body);
     assert_eq!(status, 200);
     let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(response["id"], 1);
@@ -175,9 +172,9 @@ fn http_mode_round_trips_and_enforces_auth() {
 
 #[test]
 fn a_foreign_http_server_is_untouched_in_shared_deployments() {
-    // The relay answers 404 for everything that is not /hub-rpc; in the real
+    // The relay answers 404 for everything that is not /mesh-rpc; in the real
     // shared-port deployment the front service keeps its own paths and the
-    // reverse proxy maps only /hub-rpc to us. Assert the 404 contract again in
+    // reverse proxy maps only /mesh-rpc to us. Assert the 404 contract again in
     // isolation so a proxy mis-route is visible.
     let dir = temp_dir("404");
     let port = 29532;

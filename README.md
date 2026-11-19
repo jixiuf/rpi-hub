@@ -7,7 +7,7 @@ dylib 里——旧的双插件（rpi-hub + rpi-wechat）各自静态链接 core�
 
 设计目标来自实际用法：**一台办公机 + 一台服务器**；两台机器网络/环境不同，部分调研必须
 交给位于对应网络里的实例完成；微信同一时刻只能接一个实例，但接管者要能切换。
-跨机协作全程走 relay 信箱（双向：任何一侧实例都能 hub_ask 另一侧），不依赖 ssh。
+跨机协作全程走 relay 信箱（双向：任何一侧实例都能 mesh_ask 另一侧），不依赖 ssh。
 
 ```
 rpi-mesh/
@@ -16,6 +16,12 @@ rpi-mesh/
     └── src/wechat/  # 通道实现：iLink 桥、OwnerLoop、手机命令、媒体工具
 ```
 
+> **目录迁移**（pi-hub → mesh）：新版本使用 `~/.rpi/agent/mesh`（`mesh.db`）。
+> 从旧布局升级请手动迁移一次：
+> `mv ~/.rpi/agent/pi-hub ~/.rpi/agent/mesh && mv ~/.rpi/agent/mesh/hub.db ~/.rpi/agent/mesh/mesh.db`
+> 环境变量改名：`RPI_HUB_DIR`→`RPI_MESH_DIR`、`RPI_HUB_INSTANCE`→`RPI_MESH_INSTANCE`、
+> `RPI_HUB_DEBUG`→`RPI_MESH_DEBUG`（无兼容别名，按当前要求）。
+>
 > 个人 dots 配置里如果镜像了这份仓库（如 `~/vmacs/dots/rpi/agent/extensions`），那是开发副本；
 > 正式源码以本仓库为准。
 
@@ -29,7 +35,7 @@ rpi-mesh/
 | 接管转移 | `/use` = assign 租约 + assign/unassign 信封 + generation fence；旧 owner 毫秒级感知 |
 | 实例死亡 | presence 行带 pid：同 host 死进程 `kill(pid,0)` 立即清出列表、不再阻塞接管 |
 | `/ask` 回链 | 宿主 `SendUserMessage` 同步返回 run 结果（status + 最终文本），correlation 精确绑定，绝不静默挂死 |
-| 任务委派 | `hub_ask`/`/ask` 委派目标实例，结果以通知回发起方 |
+| 任务委派 | `mesh_ask`/`/ask` 委派目标实例，结果以通知回发起方 |
 
 ## 安装
 
@@ -47,17 +53,17 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 ```
 
 > 升级自旧双插件（rpi-hub + rpi-wechat）：先删掉
-> `~/.rpi/agent/extensions/librpi_hub.dylib` 与 `librpi_wechat.dylib`，
+> `~/.rpi/agent/extensions/librpi_hub.dylib` 与 `librpi_wechat.dylib`（旧双插件），
 > 否则旧插件会与新 mesh 在同一进程并存（schema v1/v2 混跑）。
 
 ## 工具（给模型用）
 
 | 工具 | 作用 |
 | --- | --- |
-| `hub_instances` | 列出实例（本机/远程、cwd、会话、忙闲）与微信接管者 |
-| `hub_send` | 把消息投进目标实例的 agent 输入队列 |
-| `hub_ask` | 委派任务并等待目标实例的最终回答 |
-| `hub_switch` | 把某个渠道（默认 `wechat`）的接管切到目标实例 |
+| `mesh_instances` | 列出实例（本机/远程、cwd、会话、忙闲）与微信接管者 |
+| `mesh_send` | 把消息投进目标实例的 agent 输入队列 |
+| `mesh_ask` | 委派任务并等待目标实例的最终回答 |
+| `mesh_switch` | 把某个渠道（默认 `wechat`）的接管切到目标实例 |
 | `send_image_to_wechat` / `send_file_to_wechat` | 微信媒体外发（iLink CDN 加密上传） |
 
 ## 斜杠命令
@@ -69,7 +75,7 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 /ask <实例> <任务>          委派任务（结果以通知形式回到本会话）
 /start [目录]               本机 tmux 启动新实例（缺省=当前实例目录；允许同目录多实例）
 /stop <实例|编号>           停止本机实例的 tmux（租约自动交还）
-/hub status|who|name <名>|leave
+/mesh status|who|name <名>|leave
 /wechat login|start|stop|status
 ```
 
@@ -90,11 +96,11 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 ## 状态与配置
 
 ```
-~/.rpi/agent/pi-hub/
+~/.rpi/agent/mesh/
 ├── config.json
-├── hub.db               # SQLite（WAL），多进程共享；schema v2（leases.state_json）
+├── mesh.db              # SQLite（WAL），多进程共享；schema v2（leases.state_json）
 ├── relay-token
-├── logs/hub.log logs/wechat.log
+├── logs/mesh.log logs/wechat.log
 └── wechat/              # 微信凭据（0600）与媒体暂存
 ```
 
@@ -113,7 +119,7 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 `lease.ttlSeconds` 必须 ≥ 45（要覆盖微信桥 40s 的 getupdates 长轮询）；`renewSeconds` ≤ ttl/4。
 旧配置里的 `resumeGraceSeconds` / `autoClaim` 已废弃（serde 忽略未知键）。
 
-环境变量：`RPI_HUB_DIR`（状态目录）、`RPI_HUB_INSTANCE`（实例名）、`RPI_HUB_DEBUG=1`。
+环境变量：`RPI_MESH_DIR`（状态目录）、`RPI_MESH_INSTANCE`（实例名）、`RPI_MESH_DEBUG=1`、`RPI_MESH_HOST`（主机名覆盖）。
 
 **实例名默认 = 项目目录名**，`name@host` 天然区分「哪个项目在哪台机器」。同项目同机多会话
 自动加 `-<pid>`。`/use home` 匹配顺序：完整名 → `name@host` → 去 pid 后缀 → 唯一前缀。
@@ -122,7 +128,7 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 
 relay 跑在服务器（`remote.mode=relay`，监听 TCP/unix socket），办公室以
 `remote.mode=client` 直连。两种线上格式：直连 JSON-RPC（首帧 authenticate）与
-HTTP 表单端口（`http: true`，`POST /hub-rpc`，token 在 `X-Hub-Auth`）——专为
+HTTP 表单端口（`http: true`，`POST /mesh-rpc`，token 在 `X-Mesh-Auth`）——专为
 「防火墙只放行转发到真实 HTTP 服务」的端口设计，nginx 可按路径反代。
 
 - token 文件 0600、常数时间比较、日志不落明文；非回环监听启动时警告。

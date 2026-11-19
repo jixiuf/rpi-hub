@@ -2,7 +2,7 @@
 //!
 //! The wechat lease historically had four writers across two plugins, which
 //! produced both the stale-status bugs and the display contradictions: the
-//! hub worker claimed and renewed beside the wechat plugin's own watcher +
+//! mesh worker claimed and renewed beside the wechat plugin's own watcher +
 //! bridge (same node_id, different epochs — fencing each other), and every
 //! writer wrote the footer from its own momentary view.
 //!
@@ -11,11 +11,11 @@
 //! - [`LeaseOwner`] — claim / renew / release / takeover-dead-owner. Held by
 //!   the **wechat plugin only**; its watcher and bridge are the two legitimate
 //!   brains of the channel lifecycle.
-//! - [`LeaseObserver`] — read the holder, list leases. Held by the **hub
+//! - [`LeaseObserver`] — read the holder, list leases. Held by the **mesh
 //!   plugin** (its `/use` assign flows through [`LeaseOwner::assign_to`],
 //!   reached via the owner token that the core hands out — see below).
 //! - [`LeaseAdmin`] — `assign` an arbitrary capability to a present instance
-//!   (`/use`, `/hub switch`). Exercised only by the hub plugin's command
+//!   (`/use`, `/mesh switch`). Exercised only by the mesh plugin's command
 //!   paths, on an explicit user request.
 //!
 //! The store's raw methods stay `pub` — the remote relay dispatch needs them
@@ -24,14 +24,14 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::api::HubStore;
+use crate::api::MeshStore;
 use crate::protocol::Envelope;
 use crate::store::{Claim, InstanceView, LeaseHolder};
 
 /// Capability token for `LeaseOwner` — constructed by `LeaseOwner::for_store`,
 /// so the compiler-verified path to mutation is the facade.
 pub struct LeaseOwner {
-    store: Arc<dyn HubStore>,
+    store: Arc<dyn MeshStore>,
     /// Owning node identity (the mesh node_id — one per process).
     node_id: String,
     /// Display name used when the owner (re)writes lease rows. Interior
@@ -55,8 +55,8 @@ impl Clone for LeaseOwner {
 
 impl LeaseOwner {
     /// Build an owner token. The wechat plugin constructs exactly one per
-    /// process (on its Hub); the hub plugin constructs none.
-    pub fn new(store: Arc<dyn HubStore>, node_id: String, node_name: String, ttl_ms: i64) -> Self {
+    /// process; the mesh constructs exactly one.
+    pub fn new(store: Arc<dyn MeshStore>, node_id: String, node_name: String, ttl_ms: i64) -> Self {
         Self {
             store,
             node_id,
@@ -158,16 +158,16 @@ impl LeaseOwner {
 }
 
 /// Administrative hand-off: assign a capability to a PRESENT instance on an
-/// explicit user request (`/use`). Constructed by the hub plugin for exactly
+/// explicit user request (`/use`). Constructed by the mesh plugin for exactly
 /// that path; the target must be alive (presence-gated) so we never hand a
 /// channel to a ghost.
 pub struct LeaseAdmin {
-    store: Arc<dyn HubStore>,
+    store: Arc<dyn MeshStore>,
     ttl_ms: i64,
 }
 
 impl LeaseAdmin {
-    pub fn new(store: Arc<dyn HubStore>, ttl_ms: i64) -> Self {
+    pub fn new(store: Arc<dyn MeshStore>, ttl_ms: i64) -> Self {
         Self { store, ttl_ms }
     }
 
@@ -234,13 +234,13 @@ impl LeaseAdmin {
     }
 }
 
-/// Read-only view — the hub plugin's lease surface. No mutation methods.
+/// Read-only view — the mesh plugin's lease surface. No mutation methods.
 pub struct LeaseObserver {
-    store: Arc<dyn HubStore>,
+    store: Arc<dyn MeshStore>,
 }
 
 impl LeaseObserver {
-    pub fn new(store: Arc<dyn HubStore>) -> Self {
+    pub fn new(store: Arc<dyn MeshStore>) -> Self {
         Self { store }
     }
 
@@ -251,7 +251,7 @@ impl LeaseObserver {
             .map_err(|e| e.to_string())
     }
 
-    /// All capability holders (the `/hub who` path).
+    /// All capability holders (the `/mesh who` path).
     pub fn all(&self) -> Result<Vec<(String, LeaseHolder)>, String> {
         self.store.list_leases().map_err(|e| e.to_string())
     }
@@ -260,4 +260,4 @@ impl LeaseObserver {
 // Compile-time proof of the capability split: nothing in this module gives
 // a LeaseObserver a path to claim/renew/release, and LeaseAdmin's assign is
 // the only cross-instance mutation. If someone re-adds a claim call inside
-// the hub plugin, it must go through Store directly — grep-visible.
+// the mesh plugin, it must go through Store directly — grep-visible.

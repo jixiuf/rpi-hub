@@ -33,8 +33,8 @@ cargo build -p rpi-mesh --manifest-path "$HERE/Cargo.toml" >/dev/null
 
 WORK="$(mktemp -d)"
 HUB_DIR="$WORK/hub"
-DB="$HUB_DIR/hub.db"
-LOG="$HUB_DIR/logs/hub.log"
+DB="$HUB_DIR/mesh.db"
+LOG="$HUB_DIR/logs/mesh.log"
 PIDS=()
 
 # The wechat lease is claimed by the mesh plugin's watcher. It claims only
@@ -58,7 +58,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-export RPI_HUB_DIR="$HUB_DIR"
+export RPI_MESH_DIR="$HUB_DIR"
 EXT_DIR="$HERE/target/debug"
 
 start_instance() {
@@ -180,7 +180,7 @@ if [[ "$owner" != "$name_b" ]]; then
 fi
 
 # 5. /hub status on B reports B
-send_rpc 4 3 "/hub" "status"
+send_rpc 4 3 "/mesh" "status"
 wait_for_file "$WORK/b.out" '"id":3' 10 || {
   echo "FAIL: /hub status did not answer" >&2
   tail -5 "$WORK/b.out" >&2
@@ -199,7 +199,7 @@ if grep -qiE "panic|rpi-hub disabled" "$WORK"/a.out "$WORK"/b.out; then
 fi
 
 # 6. Bidirectional mailbox: B → A. A server-side instance addresses A the
-# same way A addresses it (shared hub.db / relay): inject a text envelope
+# same way A addresses it (shared mesh.db / relay): inject a text envelope
 # from B into A's mailbox and wait for A's worker to drain + ack it.
 marker="bidir-$$"
 node_a="$(sqlite3 "$DB" "SELECT node_id FROM instances WHERE name='$name_a';")"

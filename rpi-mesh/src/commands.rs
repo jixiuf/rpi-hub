@@ -10,10 +10,11 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use rpi_mesh_core::now_ms;
+use rpi_mesh_core::store::InstanceView;
 use rpi_mesh_core::protocol::Envelope;
 use rpi_plugin_sdk::{CommandHandlerFn, StbString, StbStringRef};
 
-use crate::hub::{self, Hub};
+use crate::mesh::{self, Mesh};
 use crate::tools;
 
 pub fn registry() -> Vec<(&'static str, &'static str, CommandHandlerFn)> {
@@ -22,7 +23,7 @@ pub fn registry() -> Vec<(&'static str, &'static str, CommandHandlerFn)> {
         ("use", "把微信接管切换到实例：/use <实例|编号>", cmd_use),
         ("msg", "给实例发消息：/msg <实例> <内容>", cmd_msg),
         ("ask", "让实例调研并回结果：/ask <实例> <任务>", cmd_ask),
-        ("hub", "hub 诊断：/hub status|who|name <名>|leave", cmd_hub),
+        ("mesh", "mesh 诊断：/mesh status|who|name <名>|leave", cmd_mesh),
         ("start", "本机启动新实例：/start [目录]（缺省=当前目录）", cmd_start),
         ("stop", "停止本机实例：/stop <编号|名字>", cmd_stop),
     ]
@@ -62,12 +63,12 @@ fn finish(out: *mut StbString, result: Result<Reply, String>) -> i32 {
 
 /// Selector items for the live instance list (value = display name, the same
 /// token `/use`/`/msg` accept).
-fn selector_items(hub: &Hub) -> Result<Vec<serde_json::Value>, String> {
-    let instances = hub.instances(now_ms())?;
+fn selector_items(mesh: &Mesh) -> Result<Vec<serde_json::Value>, String> {
+    let instances = mesh.instances(now_ms())?;
     if instances.is_empty() {
         return Err("没有登记的实例".to_string());
     }
-    let holder = hub
+    let holder = mesh
         .lease_observer
         .holder("wechat")
         .map_err(|e| e.to_string())?;
@@ -76,7 +77,7 @@ fn selector_items(hub: &Hub) -> Result<Vec<serde_json::Value>, String> {
         .enumerate()
         .map(|(index, instance)| {
             let mut label = format!("{}. {}", index + 1, instance.label());
-            if instance.node_id == hub.node_id {
+            if instance.node_id == mesh.node_id {
                 label.push_str("（当前）");
             }
             if holder
@@ -167,8 +168,8 @@ fn args_of(raw: StbStringRef) -> String {
     text
 }
 
-fn hub() -> Result<std::sync::Arc<Hub>, String> {
-    hub::current().ok_or_else(|| "rpi-hub 未初始化".to_string())
+fn mesh() -> Result<std::sync::Arc<Mesh>, String> {
+    mesh::current().ok_or_else(|| "rpi-mesh 未初始化".to_string())
 }
 
 /// Split `"home /reload now"` into `("home", "/reload now")`.
@@ -182,12 +183,26 @@ fn split_target(args: &str) -> (&str, &str) {
 
 extern "C" fn cmd_start(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
     let args = args_of(raw);
-    let arg = args.trim();
-    let arg_opt = if arg.is_empty() { None } else { Some(arg) };
-    match hub().and_then(|hub| {
-        let spawn_ctx = start_ctx(&hub);
+    let result = mesh().and_then(|mesh| {
+        // Cross-machine syntax: "/start <instance>:<cwd>" — the target
+        // instance identifies the machine; a `spawn` cmd envelope makes THAT
+        // machine run its local /start and mail the result back.
+        if let Some((target_query, cwd)) = args.split_once(':') {
+            let target_query = target_query.trim();
+            if !target_query.is_empty() {
+                let target = mesh.resolve_target(target_query)?;
+                if target.node_id != mesh.node_id {
+                    return forward_start(&mesh, &target, cwd.trim());
+                }
+                return Err("start 的目标实例是自己——去掉实例前缀即为本地启动".into());
+            }
+        }
+        let arg = args.trim();
+        let arg_opt = (!arg.is_empty()).then_some(arg);
+        let spawn_ctx = spawn_ctx_from(&mesh);
         rpi_mesh_core::instance_start::start(&spawn_ctx, arg_opt)
-    }) {
+    });
+    match result {
         Ok(text) => emit(out, &text),
         Err(error) => emit_error(out, error),
     }
@@ -197,42 +212,117 @@ extern "C" fn cmd_stop(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
     let args = args_of(raw);
     let query = args.trim();
     if query.is_empty() {
-        emit_error(out, "用法: /stop <编号|名字>（见 /instances）");
+        emit_error(out, "用法: /stop <编号|名字>（见 /instances）或 /stop <实例>:<实例> 跨机停止");
         return 0;
     }
-    match hub().and_then(|hub| {
-        let now = rpi_mesh_core::now_ms();
-        let spawn_ctx = start_ctx(&hub);
-        rpi_mesh_core::instance_start::stop(&spawn_ctx, query, now)
-    }) {
+    let result = mesh().and_then(|mesh| {
+        // Cross-machine syntax: "/stop <executor>:<target>" — the executor
+        // instance identifies the machine that runs its local /stop against
+        // the target.
+        if let Some((executor_query, target_query)) = query.split_once(':') {
+            let executor_query = executor_query.trim();
+            let target_query = target_query.trim();
+            if !executor_query.is_empty() && !target_query.is_empty() {
+                let executor = mesh.resolve_target(executor_query)?;
+                if executor.node_id != mesh.node_id {
+                    return forward_stop(&mesh, &executor, target_query);
+                }
+                let spawn_ctx = spawn_ctx_from(&mesh);
+                return rpi_mesh_core::instance_start::stop(
+                    &spawn_ctx,
+                    target_query,
+                    rpi_mesh_core::now_ms(),
+                );
+            }
+        }
+        let spawn_ctx = spawn_ctx_from(&mesh);
+        rpi_mesh_core::instance_start::stop(&spawn_ctx, query, rpi_mesh_core::now_ms())
+    });
+    match result {
         Ok(text) => emit(out, &text),
         Err(error) => emit_error(out, error),
     }
 }
 
-/// Assemble the core SpawnContext from the hub plugin's Hub.
-fn start_ctx(
-    hub: &Arc<Hub>,
+/// Forward a cross-machine /start: `spawn <cwd>` cmd envelope to the target
+/// instance; its worker executes the local /start and mails the result back
+/// via the reply envelope (sync wait, same as /ask).
+fn forward_start(mesh: &Arc<Mesh>, target: &InstanceView, cwd: &str) -> Result<String, String> {
+    let args_text = format!("spawn {}", cwd);
+    forward_intent(mesh, target, &args_text, &format!("/start on {}", target.label()))
+}
+
+/// Forward a cross-machine /stop: `terminate <query>` cmd envelope.
+fn forward_stop(mesh: &Arc<Mesh>, target: &InstanceView, target_query: &str) -> Result<String, String> {
+    let args_text = format!("terminate {target_query}");
+    forward_intent(mesh, target, &args_text, &format!("/stop on {}", target.label()))
+}
+
+/// Send a `cmd` intent to `target` and wait synchronously for its reply.
+fn forward_intent(
+    mesh: &Arc<Mesh>,
+    target: &InstanceView,
+    intent_args: &str,
+    label: &str,
+) -> Result<String, String> {
+    use rpi_mesh_core::protocol::CommandIntent;
+    let intent = CommandIntent {
+        name: intent_args.split_whitespace().next().unwrap_or("").to_string(),
+        args: intent_args.split_whitespace().skip(1).map(str::to_string).collect(),
+    };
+    let correlation = rpi_mesh_core::protocol::new_id();
+    let envelope = rpi_mesh_core::protocol::Envelope::command(
+        &mesh.node_id,
+        &mesh.name(),
+        &target.node_id,
+        intent,
+        rpi_mesh_core::now_ms(),
+    )
+    .with_correlation(&correlation);
+    mesh.expect_reply(&correlation);
+    mesh.deliver(envelope)?;
+    // Reuse the ask-wait machinery: block on the reply map poll.
+    let deadline = rpi_mesh_core::now_ms() + 30_000;
+    loop {
+        if let Some(outcome) = mesh.take_reply(&correlation) {
+            return if outcome.ok {
+                Ok(format!("✅ {label}：{}", outcome.text))
+            } else {
+                Err(format!("远端执行失败：{}", outcome.text))
+            };
+        }
+        if rpi_mesh_core::now_ms() >= deadline {
+            mesh.forget_reply(&correlation);
+            return Err(format!("远端 {label} 超时（目标实例未响应）"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// Assemble the core SpawnContext from the mesh Mesh. Also used by the
+/// `spawn`/`terminate` intents (cross-machine /start forward lands here).
+pub(crate) fn spawn_ctx_from(
+    mesh: &Mesh,
 ) -> rpi_mesh_core::instance_start::SpawnContext<'_> {
-    let cwd = hub
+    let cwd = mesh
         .store
-        .get_instance(&hub.node_id)
+        .get_instance(&mesh.node_id)
         .ok()
         .flatten()
         .map(|v| v.cwd)
         .unwrap_or_default();
     rpi_mesh_core::instance_start::SpawnContext {
-        store: &hub.store,
-        node_id: &hub.node_id,
-        host: &hub.host,
+        store: &mesh.store,
+        node_id: &mesh.node_id,
+        host: &mesh.host,
         cwd,
-        spawn: &hub.config.instance_spawn,
+        spawn: &mesh.config.instance_spawn,
     }
 }
 
 extern "C" fn cmd_instances(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
     let _ = raw;
-    match hub().and_then(|hub| tools::instances_text(&hub)) {
+    match mesh().and_then(|mesh| tools::instances_text(&mesh)) {
         Ok(text) => emit(out, &text),
         Err(error) => emit_error(out, error),
     }
@@ -241,7 +331,7 @@ extern "C" fn cmd_instances(raw: StbStringRef, out: *mut StbString, _ud: *mut c_
 extern "C" fn cmd_use(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
     let args = args_of(raw);
     let result = (|| -> Result<Reply, String> {
-        let hub = hub()?;
+        let mesh = mesh()?;
         // The TUI re-invokes the command with {"action":"select","value":…}
         // (or {"action":"cancel"}) after the user picks from the selector.
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&args) {
@@ -252,19 +342,19 @@ extern "C" fn cmd_use(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
                         .get("value")
                         .and_then(|v| v.as_str())
                         .ok_or("selection missing value")?;
-                    let target = hub.resolve_target(picked)?;
-                    return hub.switch_lease_to(&target).map(Reply::Text);
+                    let target = mesh.resolve_target(picked)?;
+                    return mesh.switch_lease_to(&target).map(Reply::Text);
                 }
                 _ => {}
             }
         }
         let query = args.trim();
         if query.is_empty() {
-            let items = selector_items(&hub)?;
+            let items = selector_items(&mesh)?;
             return Ok(selector_payload(&items));
         }
-        let target = hub.resolve_target(query)?;
-        hub.switch_lease_to(&target).map(Reply::Text)
+        let target = mesh.resolve_target(query)?;
+        mesh.switch_lease_to(&target).map(Reply::Text)
     })();
     finish(out, result)
 }
@@ -272,7 +362,7 @@ extern "C" fn cmd_use(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
 extern "C" fn cmd_msg(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
     let args = args_of(raw);
     let result = (|| -> Result<Reply, String> {
-        let hub = hub()?;
+        let mesh = mesh()?;
         let mut flow = MsgFlow::parse(&args);
         // Same select/cancel re-entry contract as /use.
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&args) {
@@ -288,7 +378,7 @@ extern "C" fn cmd_msg(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
             }
         }
         let Some(target_query) = flow.target.clone() else {
-            let items = selector_items(&hub)?;
+            let items = selector_items(&mesh)?;
             return Ok(selector_payload(&items));
         };
         let Some(text) = flow.text.clone() else {
@@ -299,11 +389,11 @@ extern "C" fn cmd_msg(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
                 &flow.draft,
             ));
         };
-        let target = hub.resolve_target(&target_query)?;
+        let target = mesh.resolve_target(&target_query)?;
         let envelope =
-            Envelope::text(&hub.node_id, &hub.name(), &target.node_id, text, now_ms())
+            Envelope::text(&mesh.node_id, &mesh.name(), &target.node_id, text, now_ms())
                 .map_err(|e| e.to_string())?;
-        hub.deliver(envelope)?;
+        mesh.deliver(envelope)?;
         Ok(Reply::Text(format!("已发送给 {}", target.label())))
     })();
     finish(out, result)
@@ -312,7 +402,7 @@ extern "C" fn cmd_msg(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
 extern "C" fn cmd_ask(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
     let args = args_of(raw);
     let result = (|| -> Result<Reply, String> {
-        let hub = hub()?;
+        let mesh = mesh()?;
         let mut flow = MsgFlow::parse(&args);
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&args) {
             match value.get("action").and_then(|v| v.as_str()) {
@@ -327,7 +417,7 @@ extern "C" fn cmd_ask(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
             }
         }
         let Some(target_query) = flow.target.clone() else {
-            let items = selector_items(&hub)?;
+            let items = selector_items(&mesh)?;
             return Ok(selector_payload(&items));
         };
         let Some(task) = flow.text.clone().filter(|t| !t.trim().is_empty()) else {
@@ -336,14 +426,14 @@ extern "C" fn cmd_ask(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
                 &flow.draft,
             ));
         };
-        let target = hub.resolve_target(&target_query)?;
+        let target = mesh.resolve_target(&target_query)?;
         // correlation 让目标实例在回合结束时把结果投回本实例（否则结果只会
         // 出现在目标自己的会话里）。
         let correlation = rpi_mesh_core::protocol::new_id();
-        let envelope = Envelope::text(&hub.node_id, &hub.name(), &target.node_id, task, now_ms())
+        let envelope = Envelope::text(&mesh.node_id, &mesh.name(), &target.node_id, task, now_ms())
             .map_err(|e| e.to_string())?
             .with_correlation(&correlation);
-        hub.deliver(envelope)?;
+        mesh.deliver(envelope)?;
         Ok(Reply::Text(format!(
             "任务已交给 {}；结果会以通知形式返回",
             target.label()
@@ -352,25 +442,25 @@ extern "C" fn cmd_ask(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
     finish(out, result)
 }
 
-extern "C" fn cmd_hub(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
+extern "C" fn cmd_mesh(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
     let args = args_of(raw);
     let result = (|| -> Result<Reply, String> {
-        let hub = hub()?;
+        let mesh = mesh()?;
         let (sub, rest) = split_target(&args);
         match sub {
             "" | "status" => {
                 // Build fingerprint: proves which build a running session loaded.
                 const BUILD: &str = concat!(env!("CARGO_PKG_VERSION"), "@", env!("BUILD_STAMP"));
-                let stats = hub.store.stats(now_ms()).map_err(|e| e.to_string())?;
-                let holder = hub
+                let stats = mesh.store.stats(now_ms()).map_err(|e| e.to_string())?;
+                let holder = mesh
                     .lease_observer
                     .holder("wechat")
                     .map_err(|e| e.to_string())?;
                 Ok(format!(
                     "构建: {BUILD}\n实例: {}\n节点: {}\n模式: {:?}\n实例数: {}\n待投递: {}/{} 条\n微信接管: {}",
-                    hub.label(),
-                    hub.node_id,
-                    hub.config.remote.mode,
+                    mesh.label(),
+                    mesh.node_id,
+                    mesh.config.remote.mode,
                     stats.instances,
                     stats.envelopes_pending,
                     stats.envelopes_total,
@@ -379,17 +469,17 @@ extern "C" fn cmd_hub(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
                         .unwrap_or_else(|| "(无)".to_string())
                 ))
             }
-            "who" => tools::format_leases(&hub),
+            "who" => tools::format_leases(&mesh),
             "name" => {
                 if rest.is_empty() {
-                    return Ok(Reply::Text(format!("当前实例名: {}", hub.name())));
+                    return Ok(Reply::Text(format!("当前实例名: {}", mesh.name())));
                 }
-                let name = hub.rename(rest)?;
+                let name = mesh.rename(rest)?;
                 Ok(format!("实例名已设为 {name}"))
             }
             "leave" => {
-                hub.request_shutdown();
-                Ok("本实例已退出 hub（/reload 或重启后重新加入）".to_string())
+                mesh.request_shutdown();
+                Ok("本实例已退出 mesh（/reload 或重启后重新加入）".to_string())
             }
             other => Err(format!(
                 "未知子命令 {other:?}；可用: status | who | name <名> | leave"

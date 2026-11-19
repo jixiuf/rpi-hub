@@ -1,4 +1,4 @@
-//! Cross-machine hub transport.
+//! Cross-machine mesh transport.
 //!
 //! The relay owns the SQLite database and serves a tiny line-delimited
 //! JSON-RPC on a **unix socket** (mode 0600). A client node reaches it through
@@ -23,12 +23,12 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::api::{self, method, HubStore};
+use crate::api::{self, method, MeshStore};
 use crate::protocol::Envelope;
 use crate::store::{
     Claim, Heartbeat, InstanceRecord, InstanceView, LeaseHolder, PruneReport, Stats, Store,
 };
-use crate::{HubError, Result};
+use crate::{MeshError, Result};
 
 /// Frames larger than this are rejected instead of buffered.
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -59,7 +59,7 @@ impl Token {
             // loopback-only unless the operator binds 0.0.0.0 deliberately.
             std::fs::File::open("/dev/urandom")
                 .and_then(|mut f| f.read_exact(&mut bytes))
-                .map_err(HubError::Io)?;
+                .map_err(MeshError::Io)?;
         }
         let mut hex = String::with_capacity(TOKEN_LEN);
         for b in bytes {
@@ -71,7 +71,7 @@ impl Token {
     pub fn from_hex(text: &str) -> Result<Self> {
         let trimmed = text.trim();
         if trimmed.len() != TOKEN_LEN || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(HubError::invalid(format!(
+            return Err(MeshError::invalid(format!(
                 "relay token must be exactly {TOKEN_LEN} hex characters"
             )));
         }
@@ -101,7 +101,7 @@ pub fn load_token(path: &Path, create: bool) -> Result<Token> {
         Ok(text) => Token::from_hex(&text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if !create {
-                return Err(HubError::invalid(format!(
+                return Err(MeshError::invalid(format!(
                     "relay token file {} is missing; copy it from the relay host",
                     path.display()
                 )));
@@ -114,7 +114,7 @@ pub fn load_token(path: &Path, create: bool) -> Result<Token> {
             crate::paths::restrict_permissions(path, 0o600)?;
             Ok(token)
         }
-        Err(error) => Err(HubError::Io(error)),
+        Err(error) => Err(MeshError::Io(error)),
     }
 }
 
@@ -315,20 +315,20 @@ impl Endpoint {
         let text = text.trim();
         if let Some(path) = text.strip_prefix("unix:") {
             if path.is_empty() {
-                return Err(HubError::invalid("unix endpoint needs a path"));
+                return Err(MeshError::invalid("unix endpoint needs a path"));
             }
             return Ok(Endpoint::Unix(PathBuf::from(path)));
         }
         let (host, port) = text
             .rsplit_once(':')
-            .ok_or_else(|| HubError::invalid(format!("endpoint {text:?} must be host:port")))?;
+            .ok_or_else(|| MeshError::invalid(format!("endpoint {text:?} must be host:port")))?;
         let host = host.trim_start_matches('[').trim_end_matches(']');
         if host.is_empty() {
-            return Err(HubError::invalid(format!("endpoint {text:?} needs a host")));
+            return Err(MeshError::invalid(format!("endpoint {text:?} needs a host")));
         }
         let port: u16 = port
             .parse()
-            .map_err(|_| HubError::invalid(format!("endpoint {text:?} has an invalid port")))?;
+            .map_err(|_| MeshError::invalid(format!("endpoint {text:?} has an invalid port")))?;
         Ok(Endpoint::Tcp(host.to_string(), port))
     }
 
@@ -353,7 +353,7 @@ impl Endpoint {
 /// Serve `store` on `endpoint` until `shutdown` is set.
 ///
 /// Authentication is mandatory: TCP connections must first send
-/// `authenticate {token}`; HTTP mode sends it as `X-Hub-Auth` on every call.
+/// `authenticate {token}`; HTTP mode sends it as `X-Mesh-Auth` on every call.
 /// The caller (backends, which knows the config) resolves the token.
 pub fn serve(
     endpoint: &Endpoint,
@@ -377,7 +377,7 @@ pub fn serve(
                 let store = Arc::clone(&store);
                 let token = token.clone();
                 std::thread::Builder::new()
-                    .name("rpi-hub-relay-conn".into())
+                    .name("rpi-mesh-relay-conn".into())
                     .spawn(move || {
                         let _ = if http {
                             handle_http_connection(stream, store, &token)
@@ -390,7 +390,7 @@ pub fn serve(
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err(error) => return Err(HubError::Io(error)),
+            Err(error) => return Err(MeshError::Io(error)),
         }
     }
     cleanup_listener(endpoint);
@@ -411,7 +411,7 @@ fn bind_listener(endpoint: &Endpoint) -> Result<Listener> {
             if path.exists() {
                 match UnixStream::connect(path) {
                     Ok(_) => {
-                        return Err(HubError::invalid(format!(
+                        return Err(MeshError::invalid(format!(
                             "another relay is already listening on {}",
                             path.display()
                         )))
@@ -621,13 +621,13 @@ fn handle_connection(stream: Stream, store: Arc<Store>, token: &Token) -> std::i
     Ok(())
 }
 
-/// One hub RPC inside an HTTP request/response pair, so the relay can share a
+/// One mesh RPC inside an HTTP request/response pair, so the relay can share a
 /// port that firewalls already forward to a real HTTP service.
 ///
-/// `POST /hub-rpc` with `X-Hub-Auth: <token>`, body = one JSON request object;
+/// `POST /mesh-rpc` with `X-Mesh-Auth: <token>`, body = one JSON request object;
 /// response body = one JSON response object. Anything else gets a plain 404 so
 /// the port's real owner (or a co-located reverse proxy path map) is untouched.
-const HUB_HTTP_PATH: &str = "/hub-rpc";
+const MESH_HTTP_PATH: &str = "/mesh-rpc";
 const MAX_HTTP_HEAD_BYTES: usize = 16 * 1024;
 
 fn handle_http_connection(
@@ -643,7 +643,7 @@ fn handle_http_connection(
         };
         let status;
         let body;
-        if request.path != HUB_HTTP_PATH {
+        if request.path != MESH_HTTP_PATH {
             status = "404 Not Found";
             body = b"not found".to_vec();
         } else if !token.matches(&request.auth.as_deref().unwrap_or("")) {
@@ -735,7 +735,7 @@ fn read_http_request(stream: &mut Stream) -> std::io::Result<Option<HttpRequest>
         let value = value.trim();
         match name.as_str() {
             "content-length" => content_length = value.parse().unwrap_or(0),
-            "x-hub-auth" => auth = Some(value.to_string()),
+            "x-mesh-auth" => auth = Some(value.to_string()),
             "connection" if value.eq_ignore_ascii_case("close") => close = true,
             _ => {}
         }
@@ -829,7 +829,7 @@ impl RemoteStore {
         }
         let mut payload = serde_json::to_string(&request)?;
         if payload.len() > MAX_FRAME_BYTES {
-            return Err(HubError::invalid("request too large"));
+            return Err(MeshError::invalid("request too large"));
         }
         payload.push('\n');
 
@@ -839,7 +839,7 @@ impl RemoteStore {
             let mut writer = self.writer.lock().expect("writer mutex poisoned");
             let stream = writer
                 .as_mut()
-                .ok_or_else(|| HubError::invalid("relay connection lost"))?;
+                .ok_or_else(|| MeshError::invalid("relay connection lost"))?;
             // Re-authenticate whenever this is a fresh connection: the frame
             // cost is trivial and it covers reconnects after a drop.
             let already = self.authenticated.load(Ordering::Acquire);
@@ -849,17 +849,17 @@ impl RemoteStore {
                     method: AUTH_METHOD.to_string(),
                     params: serde_json::json!({ "token": self.token.as_str() }),
                 })
-                .map_err(HubError::Json)?;
+                .map_err(MeshError::Json)?;
                 stream
                     .write_all(format!("{handshake}\n").as_bytes())
-                    .map_err(|e| HubError::invalid(format!("relay write failed: {e}")))?;
+                    .map_err(|e| MeshError::invalid(format!("relay write failed: {e}")))?;
             }
             stream
                 .write_all(payload.as_bytes())
-                .map_err(|e| HubError::invalid(format!("relay write failed: {e}")))?;
+                .map_err(|e| MeshError::invalid(format!("relay write failed: {e}")))?;
             stream
                 .flush()
-                .map_err(|e| HubError::invalid(format!("relay flush failed: {e}")))?;
+                .map_err(|e| MeshError::invalid(format!("relay flush failed: {e}")))?;
             already
         };
 
@@ -869,7 +869,7 @@ impl RemoteStore {
             let response: Response = serde_json::from_str(&line)?;
             if let Some(error) = response.error {
                 self.drop_connection();
-                return Err(HubError::invalid(error));
+                return Err(MeshError::invalid(error));
             }
             handshake_result = Some(response.result.unwrap_or(Value::Null));
         }
@@ -879,13 +879,13 @@ impl RemoteStore {
         self.authenticated.store(true, Ordering::Release);
         let _ = handshake_result;
         if response.id != id {
-            return Err(HubError::invalid(format!(
+            return Err(MeshError::invalid(format!(
                 "relay response id mismatch ({} != {id})",
                 response.id
             )));
         }
         match (response.result, response.error) {
-            (_, Some(error)) => Err(HubError::invalid(error)),
+            (_, Some(error)) => Err(MeshError::invalid(error)),
             (Some(result), None) => Ok(result),
             (None, None) => Ok(Value::Null),
         }
@@ -896,11 +896,11 @@ impl RemoteStore {
     fn call_http(&self, request: &Request) -> Result<Value> {
         let body = serde_json::to_vec(request)?;
         if body.len() > MAX_FRAME_BYTES {
-            return Err(HubError::invalid("request too large"));
+            return Err(MeshError::invalid("request too large"));
         }
         let mut stream = connect_stream(&self.endpoint, CONNECT_TIMEOUT).map_err(|error| {
-            HubError::invalid(format!(
-                "cannot reach the hub relay at {endpoint:?} ({error}); is the relay up?",
+            MeshError::invalid(format!(
+                "cannot reach the mesh relay at {endpoint:?} ({error}); is the relay up?",
                 endpoint = self.endpoint
             ))
         })?;
@@ -909,27 +909,27 @@ impl RemoteStore {
             Endpoint::Unix(_) => "localhost".to_string(),
         };
         let head = format!(
-            "POST {HUB_HTTP_PATH} HTTP/1.1\r\nHost: {host}\r\nX-Hub-Auth: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "POST {MESH_HTTP_PATH} HTTP/1.1\r\nHost: {host}\r\nX-Mesh-Auth: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             self.token.as_str(),
             body.len()
         );
         stream
             .write_all(head.as_bytes())
-            .map_err(|e| HubError::invalid(format!("relay write failed: {e}")))?;
+            .map_err(|e| MeshError::invalid(format!("relay write failed: {e}")))?;
         stream
             .write_all(&body)
-            .map_err(|e| HubError::invalid(format!("relay write failed: {e}")))?;
+            .map_err(|e| MeshError::invalid(format!("relay write failed: {e}")))?;
         stream
             .flush()
-            .map_err(|e| HubError::invalid(format!("relay flush failed: {e}")))?;
+            .map_err(|e| MeshError::invalid(format!("relay flush failed: {e}")))?;
 
         let mut reader = BufReader::new(stream);
         let mut status_line = String::new();
         reader
             .read_line(&mut status_line)
-            .map_err(|e| HubError::invalid(format!("relay read failed: {e}")))?;
+            .map_err(|e| MeshError::invalid(format!("relay read failed: {e}")))?;
         if !status_line.contains(" 200 ") {
-            return Err(HubError::invalid(format!(
+            return Err(MeshError::invalid(format!(
                 "relay HTTP status:{}",
                 status_line.trim()
             )));
@@ -939,7 +939,7 @@ impl RemoteStore {
             let mut line = String::new();
             reader
                 .read_line(&mut line)
-                .map_err(|e| HubError::invalid(format!("relay read failed: {e}")))?;
+                .map_err(|e| MeshError::invalid(format!("relay read failed: {e}")))?;
             let line = line.trim_end();
             if line.is_empty() {
                 break;
@@ -953,15 +953,15 @@ impl RemoteStore {
             }
         }
         if content_length > MAX_FRAME_BYTES {
-            return Err(HubError::invalid("relay response too large"));
+            return Err(MeshError::invalid("relay response too large"));
         }
         let mut body = vec![0u8; content_length];
         reader
             .read_exact(&mut body)
-            .map_err(|e| HubError::invalid(format!("relay read failed: {e}")))?;
+            .map_err(|e| MeshError::invalid(format!("relay read failed: {e}")))?;
         let response: Response = serde_json::from_slice(&body)?;
         match (response.result, response.error) {
-            (_, Some(error)) => Err(HubError::invalid(error)),
+            (_, Some(error)) => Err(MeshError::invalid(error)),
             (Some(result), None) => Ok(result),
             (None, None) => Ok(Value::Null),
         }
@@ -971,13 +971,13 @@ impl RemoteStore {
         let mut conn = self.conn.lock().expect("conn mutex poisoned");
         let reader = conn
             .as_mut()
-            .ok_or_else(|| HubError::invalid("relay connection lost"))?;
+            .ok_or_else(|| MeshError::invalid("relay connection lost"))?;
         let mut line = String::new();
         reader
             .read_line(&mut line)
-            .map_err(|e| HubError::invalid(format!("relay read failed: {e}")))?;
+            .map_err(|e| MeshError::invalid(format!("relay read failed: {e}")))?;
         if line.trim().is_empty() {
-            return Err(HubError::invalid("relay closed the connection"));
+            return Err(MeshError::invalid("relay closed the connection"));
         }
         Ok(line)
     }
@@ -988,8 +988,8 @@ impl RemoteStore {
             return Ok(());
         }
         let stream = connect_stream(&self.endpoint, CONNECT_TIMEOUT).map_err(|error| {
-            HubError::invalid(format!(
-                "cannot reach the hub relay at {endpoint:?} ({error}); is the relay up?",
+            MeshError::invalid(format!(
+                "cannot reach the mesh relay at {endpoint:?} ({error}); is the relay up?",
                 endpoint = self.endpoint
             ))
         })?;
@@ -1007,7 +1007,7 @@ impl RemoteStore {
     }
 
     fn typed<T: serde::de::DeserializeOwned>(value: Value) -> Result<T> {
-        serde_json::from_value(value).map_err(|e| HubError::invalid(format!("bad relay result: {e}")))
+        serde_json::from_value(value).map_err(|e| MeshError::invalid(format!("bad relay result: {e}")))
     }
 }
 
@@ -1017,7 +1017,7 @@ macro_rules! call {
     };
 }
 
-impl HubStore for RemoteStore {
+impl MeshStore for RemoteStore {
     fn register_instance(
         &self,
         record: &InstanceRecord,

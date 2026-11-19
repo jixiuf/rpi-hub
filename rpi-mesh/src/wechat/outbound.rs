@@ -42,7 +42,7 @@ fn media_type_of(is_image: bool) -> i64 {
     if is_image { 1 } else { 3 }
 }
 
-fn parse_and_validate(params: &str, hub: &crate::wechat::hub::Hub) -> Result<PathBuf, String> {
+fn parse_and_validate(params: &str, mesh: &crate::wechat::channel::Channel) -> Result<PathBuf, String> {
     let value: serde_json::Value =
         serde_json::from_str(params).map_err(|e| format!("bad params: {e}"))?;
     let path_text = value
@@ -60,7 +60,7 @@ fn parse_and_validate(params: &str, hub: &crate::wechat::hub::Hub) -> Result<Pat
     let resolved = if std::path::Path::new(path_text).is_absolute() {
         PathBuf::from(path_text)
     } else {
-        hub.cwd().join(path_text)
+        mesh.cwd().join(path_text)
     };
     if !resolved.exists() {
         return Err(format!("file not found: {}", resolved.display()));
@@ -69,7 +69,7 @@ fn parse_and_validate(params: &str, hub: &crate::wechat::hub::Hub) -> Result<Pat
 }
 
 async fn send_media(
-    _hub: &std::sync::Arc<crate::wechat::hub::Hub>,
+    _mesh: &std::sync::Arc<crate::wechat::channel::Channel>,
     client: &IlinkClient,
     user_id: &str,
     path: &Path,
@@ -184,8 +184,8 @@ extern "C" fn send_file_execute(
 }
 
 fn spawn_send_drive(params: StbString, _free: Option<FreeStringFn>, is_image: bool) -> StepHandle {
-    let hub = match crate::wechat::hub::current() {
-        Some(hub) => hub,
+    let mesh = match crate::wechat::channel::current() {
+        Some(mesh) => mesh,
         None => {
             return SEND.insert(SendDrive {
                 path: None,
@@ -198,7 +198,7 @@ fn spawn_send_drive(params: StbString, _free: Option<FreeStringFn>, is_image: bo
     // SAFETY: `params` ownership was adopted by this handler; reading it is
     // sound for the call's duration.
     let text = unsafe { params.to_string_lossy() };
-    let parsed = match parse_and_validate(&text, &hub) {
+    let parsed = match parse_and_validate(&text, &mesh) {
         Ok(path) => path,
         Err(error) => {
             return SEND.insert(SendDrive {
@@ -252,14 +252,14 @@ extern "C" fn send_poll(
                     };
                 };
                 let is_image = drive.is_image;
-                let hub = match crate::wechat::hub::current() {
-                    Some(hub) => hub,
+                let mesh = match crate::wechat::channel::current() {
+                    Some(mesh) => mesh,
                     None => {
                         drive.outcome = Some(Err("rpi-wechat not initialized".into()));
                         return StepResult::pending(StbString::empty());
                     }
                 };
-                let credentials = crate::wechat::state::Credentials::load(&hub.dir());
+                let credentials = crate::wechat::state::Credentials::load(&mesh.dir());
                 std::thread::spawn(move || {
                     let outcome = match credentials {
                         Some(credentials) => {
@@ -275,12 +275,12 @@ extern "C" fn send_poll(
                             match client {
                                 Ok(client) => runtime
                                     .block_on(send_media(
-                                        &hub,
+                                        &mesh,
                                         &client,
                                         &credentials.user_id,
                                         std::path::Path::new(&path),
                                         is_image,
-                                        hub.context_token().as_deref(),
+                                        mesh.context_token().as_deref(),
                                     ))
                                     .map_err(|e| e.to_string()),
                                 Err(error) => Err(error),
@@ -321,7 +321,7 @@ extern "C" fn send_destroy(handle: StepHandle) {
 }
 
 pub fn register(
-    _hub: &std::sync::Arc<crate::wechat::hub::Hub>,
+    _mesh: &std::sync::Arc<crate::wechat::channel::Channel>,
     api: &rpi_plugin_sdk::PluginApi,
 ) -> Result<(), String> {
     let Some(register_tool) = api.register_tool else {

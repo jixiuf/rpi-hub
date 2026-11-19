@@ -1,34 +1,34 @@
 //! Which database a node talks to.
 //!
-//! - `local`  — this process opens `hub.db` directly (single machine).
-//! - `relay`  — this process opens `hub.db` **and** serves it on a unix socket
+//! - `local`  — this process opens `mesh.db` directly (single machine).
+//! - `relay`  — this process opens `mesh.db` **and** serves it on a unix socket
 //!   for remote nodes (normally the always-on server).
 //! - `client` — all state lives on a relay, reached through an SSH stream-local
 //!   forward this process supervises.
 //!
-//! The rest of the plugin only sees `Arc<dyn HubStore>`.
+//! The rest of the plugin only sees `Arc<dyn MeshStore>`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use rpi_mesh_core::api::HubStore;
-use rpi_mesh_core::config::{HubConfig, RemoteMode};
+use rpi_mesh_core::api::MeshStore;
+use rpi_mesh_core::config::{MeshConfig, RemoteMode};
 use rpi_mesh_core::paths;
 use rpi_mesh_core::store::Store;
 use rpi_mesh_core::wire::{load_token, serve, Endpoint, RemoteStore};
 
-use crate::hub::log;
+use crate::mesh::log;
 
 pub struct Backends {
-    pub store: Arc<dyn HubStore>,
+    pub store: Arc<dyn MeshStore>,
     pub description: String,
     relay_stop: Option<Arc<AtomicBool>>,
     relay_join: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Backends {
-    pub fn start(dir: &Path, config: &HubConfig) -> Result<Self, String> {
+    pub fn start(dir: &Path, config: &MeshConfig) -> Result<Self, String> {
         let relay = &config.remote.relay;
         match config.remote.mode {
             RemoteMode::Local => {
@@ -62,7 +62,7 @@ impl Backends {
                 let store_for_thread = Arc::clone(&store);
                 let stop_for_thread = Arc::clone(&stop);
                 let join = std::thread::Builder::new()
-                    .name("rpi-hub-relay".into())
+                    .name("rpi-mesh-relay".into())
                     .spawn(move || {
                         log(&format!("relay serving {endpoint_for_thread:?}"));
                         if let Err(error) = serve(
@@ -120,13 +120,13 @@ impl Backends {
     }
 }
 
-/// Token file location: explicit `tokenFile`, else `<hub dir>/relay-token`.
-fn token_path(dir: &Path, config: &HubConfig) -> PathBuf {
+/// Token file location: explicit `tokenFile`, else `<mesh dir>/relay-token`.
+fn token_path(dir: &Path, config: &MeshConfig) -> PathBuf {
     if let Some(path) = &config.remote.relay.token_file {
         let expanded = expand_home(path);
         return PathBuf::from(expanded);
     }
-    paths::hub_dir()
+    paths::mesh_dir()
         .unwrap_or_else(|_| dir.to_path_buf())
         .join("relay-token")
 }

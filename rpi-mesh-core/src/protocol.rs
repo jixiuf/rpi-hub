@@ -1,4 +1,4 @@
-//! The hub wire format: envelopes (mailbox items) and command intents.
+//! The mesh wire format: envelopes (mailbox items) and command intents.
 //!
 //! An envelope is a self-contained JSON document stored in the `envelopes`
 //! table. Keeping the whole document in `payload` means the schema never has to
@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{HubError, Result};
+use crate::{MeshError, Result};
 
 /// Upper bound for a single text body (agent input or command output).
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
@@ -85,16 +85,16 @@ impl CommandIntent {
         let mut parts = trimmed.split_whitespace();
         let name = parts
             .next()
-            .ok_or_else(|| HubError::invalid("empty command"))?;
+            .ok_or_else(|| MeshError::invalid("empty command"))?;
         if !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
         {
-            return Err(HubError::invalid(format!("invalid command name {name:?}")));
+            return Err(MeshError::invalid(format!("invalid command name {name:?}")));
         }
         let args: Vec<String> = parts.map(str::to_string).collect();
         if args.len() > MAX_COMMAND_ARGS {
-            return Err(HubError::invalid("too many command arguments"));
+            return Err(MeshError::invalid("too many command arguments"));
         }
         Ok(Self {
             name: name.to_ascii_lowercase(),
@@ -344,7 +344,7 @@ impl Envelope {
 
 fn check_text(text: &str) -> Result<()> {
     if text.len() > MAX_TEXT_BYTES {
-        return Err(HubError::invalid(format!(
+        return Err(MeshError::invalid(format!(
             "text is {} bytes, limit is {MAX_TEXT_BYTES}",
             text.len()
         )));

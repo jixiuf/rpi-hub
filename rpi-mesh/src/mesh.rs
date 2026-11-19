@@ -1,7 +1,7 @@
-//! Per-load hub state: identity, store handle, runtime-action bridge, worker
+//! Per-load mesh state: identity, store handle, runtime-action bridge, worker
 //! coordination.
 //!
-//! One `Hub` exists per loaded plugin instance. `/reload` loads a fresh copy of
+//! One `Mesh` exists per loaded plugin instance. `/reload` loads a fresh copy of
 //! the dylib, so `install` replacing the previous value is normal; the previous
 //! worker is told to stop first and its epoch becomes stale in the store, which
 //! fences any straggling write.
@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
-use rpi_mesh_core::api::HubStore;
-use rpi_mesh_core::config::{self, HubConfig};
+use rpi_mesh_core::api::MeshStore;
+use rpi_mesh_core::config::{self, MeshConfig};
 use rpi_mesh_core::names;
 use rpi_mesh_core::now_ms;
 use rpi_mesh_core::paths;
@@ -79,10 +79,10 @@ impl Shutdown {
     }
 }
 
-pub struct Hub {
+pub struct Mesh {
     pub dir: PathBuf,
-    pub config: HubConfig,
-    pub store: Arc<dyn HubStore>,
+    pub config: MeshConfig,
+    pub store: Arc<dyn MeshStore>,
     /// Read-only lease surface (rpi_mesh_core::lease). The mesh never claims.
     pub lease_observer: rpi_mesh_core::lease::LeaseObserver,
     backend: Mutex<Option<crate::backends::Backends>>,
@@ -104,14 +104,14 @@ pub struct Hub {
     pub last_error: Mutex<Option<String>>,
 }
 
-static CURRENT: OnceLock<Mutex<Option<Arc<Hub>>>> = OnceLock::new();
+static CURRENT: OnceLock<Mutex<Option<Arc<Mesh>>>> = OnceLock::new();
 
-fn cell() -> &'static Mutex<Option<Arc<Hub>>> {
+fn cell() -> &'static Mutex<Option<Arc<Mesh>>> {
     CURRENT.get_or_init(|| Mutex::new(None))
 }
 
-/// The hub for the currently loaded plugin instance, if any.
-pub fn current() -> Option<Arc<Hub>> {
+/// The mesh for the currently loaded plugin instance, if any.
+pub fn current() -> Option<Arc<Mesh>> {
     cell().lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
@@ -122,22 +122,22 @@ pub fn clear_current() {
     *slot = None;
 }
 
-/// Build the hub and make it current. Any previous worker is stopped first.
-pub fn install(api: &PluginApi) -> Result<Arc<Hub>, String> {
-    let hub = Arc::new(Hub::new(api)?);
+/// Build the mesh and make it current. Any previous worker is stopped first.
+pub fn install(api: &PluginApi) -> Result<Arc<Mesh>, String> {
+    let mesh = Arc::new(Mesh::new(api)?);
     let previous = {
         let mut slot = cell().lock().unwrap_or_else(|p| p.into_inner());
-        slot.replace(Arc::clone(&hub))
+        slot.replace(Arc::clone(&mesh))
     };
     if let Some(previous) = previous {
         previous.request_shutdown();
     }
-    Ok(hub)
+    Ok(mesh)
 }
 
-impl Hub {
+impl Mesh {
     fn new(api: &PluginApi) -> Result<Self, String> {
-        let dir = paths::hub_dir().map_err(|e| e.to_string())?;
+        let dir = paths::mesh_dir().map_err(|e| e.to_string())?;
         paths::ensure_private_dir(&dir).map_err(|e| e.to_string())?;
         paths::ensure_private_dir(&paths::log_dir(&dir)).map_err(|e| e.to_string())?;
 
@@ -353,7 +353,7 @@ impl Hub {
             RuntimeActionId::SendMessage,
             serde_json::json!({
                 "message": {
-                    "customType": "rpi-hub",
+                    "customType": "rpi-mesh",
                     "content": text,
                     "display": true,
                 },
@@ -366,7 +366,7 @@ impl Hub {
     pub fn set_status(&self, value: &str) {
         let _ = self.action(
             RuntimeActionId::SetStatus,
-            serde_json::json!({ "key": "hub", "value": value }),
+            serde_json::json!({ "key": "mesh", "value": value }),
         );
     }
 
@@ -561,7 +561,7 @@ impl Hub {
                 Ok(())
             }
             EnvelopeKind::Notice => self.notice(&envelope.text.unwrap_or_default()),
-            // Assign/unassign are display-only; the hub plugin in the same
+            // Assign/unassign are display-only; the mesh plugin in the same
             // process shows the notice via its worker mailbox instead.
             EnvelopeKind::Assign | EnvelopeKind::Unassign => Ok(()),
         }
@@ -617,10 +617,10 @@ impl Hub {
     }
 
     pub fn start_worker(self: &Arc<Self>) {
-        let hub = Arc::clone(self);
+        let mesh = Arc::clone(self);
         let handle = std::thread::Builder::new()
-            .name("rpi-hub".into())
-            .spawn(move || crate::worker::run(hub))
+            .name("rpi-mesh".into())
+            .spawn(move || crate::worker::run(mesh))
             .ok();
         *self.worker.lock().unwrap_or_else(|p| p.into_inner()) = handle;
     }
@@ -657,22 +657,22 @@ impl Hub {
     }
 }
 
-/// Append a line to `logs/hub.log` (5 MB rotation) and, when `RPI_HUB_DEBUG=1`,
+/// Append a line to `logs/mesh.log` (5 MB rotation) and, when `RPI_MESH_DEBUG=1`,
 /// to stderr.
 pub fn log(message: &str) {
     let line = format!("{} [{}] {message}\n", now_ms(), std::process::id());
-    if std::env::var("RPI_HUB_DEBUG").ok().as_deref() == Some("1") {
-        eprint!("rpi-hub: {line}");
+    if std::env::var("RPI_MESH_DEBUG").ok().as_deref() == Some("1") {
+        eprint!("rpi-mesh: {line}");
     }
-    let Ok(dir) = paths::hub_dir() else {
+    let Ok(dir) = paths::mesh_dir() else {
         return;
     };
     let dir = paths::log_dir(&dir);
     let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("hub.log");
+    let path = dir.join("mesh.log");
     if let Ok(metadata) = std::fs::metadata(&path) {
         if metadata.len() > 5 * 1024 * 1024 {
-            let _ = std::fs::rename(&path, dir.join("hub.log.1"));
+            let _ = std::fs::rename(&path, dir.join("mesh.log.1"));
         }
     }
     use std::io::Write;
@@ -687,7 +687,7 @@ pub fn log(message: &str) {
 
 /// Best-effort hostname without an extra dependency.
 pub fn detect_host() -> String {
-    for key in ["RPI_HUB_HOST", "HOSTNAME", "HOST", "COMPUTERNAME"] {
+    for key in ["RPI_MESH_HOST", "HOSTNAME", "HOST", "COMPUTERNAME"] {
         if let Ok(value) = std::env::var(key) {
             let value = value.trim();
             if !value.is_empty() {

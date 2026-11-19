@@ -2,7 +2,7 @@
 //!
 //! Contract (pi-rust PR #338, **full-candidate-list mode**): the host caches
 //! the response **per command** and narrows it locally against the typed
-//! prefix on every keystroke, so rpi-hub returns the FULL instance list and
+//! prefix on every keystroke, so rpi-mesh returns the FULL instance list and
 //! ignores the request's `args` field (`{"command":"/msg","args":"ap"}`).
 //! Filtering here would poison the host's per-command cache: after the user
 //! types `ap`, deleting a character could not restore candidates the filtered
@@ -19,7 +19,7 @@
 //!   the plugin must not rely on it).
 //!
 //! The instance list is cached for 2 s (presence changes on the 3 s heartbeat
-//! cadence; for client-mode hubs a refresh costs a relay round-trip), so the
+//! cadence; for client-mode instances a refresh costs a relay round-trip), so the
 //! host's background refresh pays the round-trip at most once per cache
 //! window. Typing itself never waits on this handler.
 
@@ -29,7 +29,7 @@ use rpi_mesh_core::now_ms;
 use rpi_mesh_core::store::InstanceView;
 use rpi_plugin_sdk::{StbString, StbStringRef};
 
-use crate::hub;
+use crate::mesh;
 
 const CACHE_TTL_MS: i64 = 2_000;
 
@@ -61,14 +61,14 @@ fn build_suggestions(request: &str) -> Option<serde_json::Value> {
     let command = value.get("command")?.as_str()?.trim_start_matches('/');
     let args = value.get("args").and_then(|v| v.as_str()).unwrap_or("");
 
-    let hub = hub::current()?;
+    let mesh = mesh::current()?;
     // /cmd and /ask take a SECOND argument (the intent) after the target:
     // offer the intent list as composite rows ("target /new", …) once a
     // target is typed. The host's narrowing is prefix-ranked, so these
     // composite rows win (rank 0) while the bare instance rows still match
     // by contains (rank 2) — both visible, the intent rows first.
     let items = if command == "ask" {
-        let mut items = cached_rows(&hub)?;
+        let mut items = cached_rows(&mesh)?;
         let target_part = args.split_once(char::is_whitespace).map(|(t, _)| t);
         if let Some(target) = target_part.filter(|t| !t.trim().is_empty()) {
             for (name, desc) in INTENTS {
@@ -80,7 +80,7 @@ fn build_suggestions(request: &str) -> Option<serde_json::Value> {
         }
         cap_rows(items)
     } else {
-        cap_rows(cached_rows(&hub)?)
+        cap_rows(cached_rows(&mesh)?)
     };
     Some(serde_json::json!({
         "items": items,
@@ -107,7 +107,7 @@ const INTENTS: &[(&str, &str)] = &[
 /// the full candidate list; the host narrows against the typed prefix
 /// locally, per keystroke). The cache holds the full list so the host's
 /// background refresh pays the relay round-trip at most once per 2 s window.
-fn cached_rows(hub: &std::sync::Arc<hub::Hub>) -> Option<Vec<serde_json::Value>> {
+fn cached_rows(mesh: &std::sync::Arc<mesh::Mesh>) -> Option<Vec<serde_json::Value>> {
     struct Rows {
         payload: Vec<serde_json::Value>,
         at: i64,
@@ -125,13 +125,13 @@ fn cached_rows(hub: &std::sync::Arc<hub::Hub>) -> Option<Vec<serde_json::Value>>
     let all = match payload {
         Some(all) => all,
         None => {
-            let instances = hub.instances(now_ms()).ok()?;
-            let holder = hub.lease_observer.holder("wechat").ok()?;
+            let instances = mesh.instances(now_ms()).ok()?;
+            let holder = mesh.lease_observer.holder("wechat").ok()?;
             // Local instance first (current), then others by name — same order
             // as `/instances`, so the popup numbering matches.
             let mut rows: Vec<(bool, &InstanceView)> = instances
                 .iter()
-                .map(|instance| (instance.node_id == hub.node_id, instance))
+                .map(|instance| (instance.node_id == mesh.node_id, instance))
                 .collect();
             rows.sort_by(|a, b| {
                 b.0.cmp(&a.0)
@@ -189,7 +189,7 @@ const MAX_FIELD_CHARS: usize = 256;
 
 /// Enforce the response caps: at most [`MAX_ITEMS`] rows, every field at most
 /// [`MAX_FIELD_CHARS`] characters. Pure, so the caps are regression-tested
-/// without a live hub.
+/// without a live mesh.
 fn cap_rows(items: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
     items
         .into_iter()

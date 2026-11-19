@@ -1,7 +1,7 @@
 //! Auth behavior: token rules, handshake enforcement, redaction.
 
 use super::{serve, Endpoint, RemoteStore, Token, AUTH_METHOD, TOKEN_LEN};
-use crate::api::HubStore;
+use crate::api::MeshStore;
 use crate::store::Store;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "rpi-hub-wire-{name}-{}-{}",
+        "rpi-mesh-wire-{name}-{}-{}",
         std::process::id(),
         crate::now_ms()
     ));

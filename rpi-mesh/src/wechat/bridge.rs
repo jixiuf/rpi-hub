@@ -4,7 +4,7 @@
 //! Loop (per tick, all on this thread):
 //! 1. liveness gate — the OwnerLoop (owner.rs) holds the lease and renews
 //!    it on its own clock; when it drops the flag, stop immediately.
-//! 2. `getupdates` long poll (cursor + `seen` dedupe in the hub store).
+//! 2. `getupdates` long poll (cursor + `seen` dedupe in the mesh store).
 //! 3. Authorized inbound routing (mirrors the reference implementation):
 //!    - text ⇒ notice + inject (with accumulated files/images batch)
 //!    - image ⇒ download, save, ack, start an 8s batch window
@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::wechat::error::IlinkError;
-use crate::wechat::hub::Hub;
+use crate::wechat::channel::Channel;
 use crate::wechat::ilink::{self, FilePayload, IlinkClient, ImagePayload, UpdatesPage};
 use crate::wechat::owner::FACT_POLL;
 /// Backoff after a transport error.
@@ -113,8 +113,8 @@ pub fn authorized_and_new(
     seen.insert(msg.message_id.clone())
 }
 
-fn media_dir_of(hub: &Hub) -> std::path::PathBuf {
-    let dir = crate::wechat::state::wechat_dir(&hub.dir()).join("media");
+fn media_dir_of(mesh: &Channel) -> std::path::PathBuf {
+    let dir = crate::wechat::state::wechat_dir(&mesh.dir()).join("media");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -123,7 +123,7 @@ fn media_dir_of(hub: &Hub) -> std::path::PathBuf {
 /// the agent lane as ONE user message (matching the reference implementation's
 /// content-blocks delivery). Pure-file batches are never injected.
 async fn drain_inbound(
-    hub: Arc<Hub>,
+    mesh: Arc<Channel>,
     ctx: &BridgeContext,
     text: String,
     images: Vec<ImageData>,
@@ -160,9 +160,9 @@ async fn drain_inbound(
     }
     let combined = parts.join("\n");
 
-    let _ = hub.notice(&format!("📨 微信: {combined}"));
-    if let Err(error) = hub.send_user_content(&combined, &images, Some("steer")) {
-        hub.record_error(format!("wechat: inject batch failed: {error}"));
+    let _ = mesh.notice(&format!("📨 微信: {combined}"));
+    if let Err(error) = mesh.send_user_content(&combined, &images, Some("steer")) {
+        mesh.record_error(format!("wechat: inject batch failed: {error}"));
         let _ = ctx
             .client
             .send_text(&ctx.user_id, &format!("⚠ 消息注入失败: {error}"), None)
@@ -190,9 +190,9 @@ pub struct BatchState {
 // ---- per-kind inbound handlers (PR-3b): one async fn per message kind ----
 
 /// Text flushes whatever accumulated with it (images/files) as one injection.
-async fn handle_text(hub: Arc<Hub>, ctx: &BridgeContext, text: String, batch: &mut BatchState) {
+async fn handle_text(mesh: Arc<Channel>, ctx: &BridgeContext, text: String, batch: &mut BatchState) {
     drain_inbound(
-        hub,
+        mesh,
         ctx,
         text,
         std::mem::take(&mut batch.images),
@@ -203,7 +203,7 @@ async fn handle_text(hub: Arc<Hub>, ctx: &BridgeContext, text: String, batch: &m
 
 /// Image: download, save, notify, accumulate for the next text message.
 async fn handle_image(
-    hub: Arc<Hub>,
+    mesh: Arc<Channel>,
     ctx: &BridgeContext,
     payload: ImagePayload,
     context_token: Option<&str>,
@@ -212,7 +212,7 @@ async fn handle_image(
     let download = ctx.client.clone();
     let url = payload.url.clone();
     let key = payload.aes_key.clone();
-    let media_dir = media_dir_of(&hub);
+    let media_dir = media_dir_of(&mesh);
     let downloaded = async {
         let (bytes, _media_type) =
             crate::wechat::media::download_image(&download, &url, key.as_deref()).await?;
@@ -223,7 +223,7 @@ async fn handle_image(
     .await;
     match downloaded {
         Ok(data) => {
-            let _ = hub.notice("📨 微信图片已接收");
+            let _ = mesh.notice("📨 微信图片已接收");
             let _ = ctx
                 .client
                 .send_text(
@@ -238,7 +238,7 @@ async fn handle_image(
             });
         }
         Err(error) => {
-            hub.record_error(format!("wechat image: {error}"));
+            mesh.record_error(format!("wechat image: {error}"));
             let _ = ctx
                 .client
                 .send_text(
@@ -253,13 +253,13 @@ async fn handle_image(
 
 /// File: download, save, notify, accumulate (never auto-injected).
 async fn handle_file(
-    hub: Arc<Hub>,
+    mesh: Arc<Channel>,
     ctx: &BridgeContext,
     payload: FilePayload,
     context_token: Option<&str>,
     batch: &mut BatchState,
 ) {
-    crate::wechat::hub::log(&format!(
+    crate::wechat::channel::log(&format!(
         "file branch: param_len={} key={} name={}",
         payload.encrypt_param.len(),
         payload.aes_key.is_some(),
@@ -269,7 +269,7 @@ async fn handle_file(
     let full_url = payload.full_url.clone();
     let key = payload.aes_key.clone();
     let name = payload.file_name.clone();
-    let media_dir = media_dir_of(&hub);
+    let media_dir = media_dir_of(&mesh);
     let downloaded: Result<(Vec<u8>, PathBuf), IlinkError> = async {
         let bytes = crate::wechat::media::download_file(&download, &full_url, key.as_deref()).await?;
         let path = crate::wechat::media::save_to_disk(&media_dir, &name, &bytes)?;
@@ -283,7 +283,7 @@ async fn handle_file(
                 size: bytes.len(),
                 path: path.display().to_string(),
             });
-            let _ = hub.notice(&format!("📨 微信文件已接收: {}", path.display()));
+            let _ = mesh.notice(&format!("📨 微信文件已接收: {}", path.display()));
             let kb = (bytes.len() as f64 / 1024.0 * 10.0).round() / 10.0;
             let _ = ctx
                 .client
@@ -295,7 +295,7 @@ async fn handle_file(
                 .await;
         }
         Err(error) => {
-            hub.record_error(format!("wechat file: {error}"));
+            mesh.record_error(format!("wechat file: {error}"));
             let _ = ctx
                 .client
                 .send_text(
@@ -310,16 +310,16 @@ async fn handle_file(
 
 /// Voice: inject the server transcript (with accumulated media), or explain.
 async fn handle_voice(
-    hub: Arc<Hub>,
+    mesh: Arc<Channel>,
     ctx: &BridgeContext,
     transcript: Option<String>,
     context_token: Option<&str>,
     batch: &mut BatchState,
 ) {
     match transcript {
-        Some(text) => handle_text(hub, ctx, format!("[语音转文字] {text}"), batch).await,
+        Some(text) => handle_text(mesh, ctx, format!("[语音转文字] {text}"), batch).await,
         None => {
-            let _ = hub.notice("📨 微信语音：无转写文本");
+            let _ = mesh.notice("📨 微信语音：无转写文本");
             let _ = ctx
                 .client
                 .send_text(
@@ -333,8 +333,8 @@ async fn handle_voice(
 }
 
 /// Video: not supported; tell the user rather than dropping silently.
-async fn handle_video(hub: Arc<Hub>, ctx: &BridgeContext, context_token: Option<&str>) {
-    let _ = hub.notice("📨 微信视频已接收（暂不支持查看）");
+async fn handle_video(mesh: Arc<Channel>, ctx: &BridgeContext, context_token: Option<&str>) {
+    let _ = mesh.notice("📨 微信视频已接收（暂不支持查看）");
     let _ = ctx
         .client
         .send_text(
@@ -354,11 +354,11 @@ pub struct BridgeContext {
 
 /// Run the bridge loop until the lease is lost, the session expires, or
 /// shutdown is requested.
-pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
+pub async fn run(mesh: Arc<Channel>, ctx: BridgeContext) -> StopReason {
     // Shared cursor from the DB: a hand-off mid-poll never replays or splits
     // messages, because whoever polls next continues from the advanced cursor.
     let mut cursor = {
-        let state = hub.store().channel_state("wechat");
+        let state = mesh.store().channel_state("wechat");
         let from_state = state
             .as_ref()
             .and_then(|s| s.get("cursor").and_then(|c| c.as_str()))
@@ -375,10 +375,10 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
     // The mid-poll lease re-check is gone: the owner loop renews on its own
     // clock, so a 40s getupdates can no longer outlive the lease. The bridge
     // simply stops the moment the owner loop drops the liveness flag.
-    let mut lease_alive = hub.lease_alive();
+    let mut lease_alive = mesh.lease_alive();
 
     loop {
-        if hub.shutdown().requested() {
+        if mesh.shutdown().requested() {
             return StopReason::Shutdown;
         }
         if !lease_alive {
@@ -394,7 +394,7 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
                     .send_text(&ctx.user_id, &chunk, context_token.as_deref())
                     .await
                 {
-                    hub.record_error(format!("wechat: pending resend failed: {error}"));
+                    mesh.record_error(format!("wechat: pending resend failed: {error}"));
                     undelivered.push(chunk);
                     break;
                 }
@@ -407,15 +407,15 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
         // immediately: the old owner exits at once and the cursor stays
         // put, so the new owner re-polls the same batch from the shared
         // cursor.
-        match abortable_get_updates(&hub, &ctx.client, &cursor).await {
+        match abortable_get_updates(&mesh, &ctx.client, &cursor).await {
             Ok(page) => {
                 cursor = page.cursor;
                 {
-                    let mut state = hub.store().channel_state("wechat").unwrap_or_default();
+                    let mut state = mesh.store().channel_state("wechat").unwrap_or_default();
                     state["cursor"] = serde_json::json!(cursor);
-                    hub.store().set_channel_state("wechat", &state);
+                    mesh.store().set_channel_state("wechat", &state);
                 }
-                crate::wechat::state::save_cursor(&hub.dir(), &cursor);
+                crate::wechat::state::save_cursor(&mesh.dir(), &cursor);
                 for raw in &page.msgs {
                     let Some(incoming) = ilink::normalize_msg(raw) else {
                         continue;
@@ -425,25 +425,25 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
                     }
                     if !incoming.context_token.is_empty() {
                         context_token = Some(incoming.context_token.clone());
-                        hub.set_context_token(Some(&incoming.context_token));
+                        mesh.set_context_token(Some(&incoming.context_token));
                     }
-                    deliver(&hub, &ctx, incoming, context_token.as_deref(), &mut batch).await;
+                    deliver(&mesh, &ctx, incoming, context_token.as_deref(), &mut batch).await;
                 }
             }
             Err(IlinkError::Cancelled) => {
-                crate::wechat::hub::log("poll aborted: lease lost mid-poll; new owner re-polls the batch");
+                crate::wechat::channel::log("poll aborted: lease lost mid-poll; new owner re-polls the batch");
                 return StopReason::LeaseLost;
             }
             Err(error) => {
                 if error.is_session_expired() {
-                    hub.record_error("wechat: session expired; run /wechat login");
+                    mesh.record_error("wechat: session expired; run /wechat login");
                     // The owner loop must release the lease for us — otherwise
                     // it would keep renewing for a bridge that can never poll
                     // or send again ("actively holding while dead").
-                    hub.set_bridge_stop(StopReason::SessionExpired);
+                    mesh.set_bridge_stop(StopReason::SessionExpired);
                     return StopReason::SessionExpired;
                 }
-                hub.record_error(format!("wechat: getupdates failed: {error}"));
+                mesh.record_error(format!("wechat: getupdates failed: {error}"));
                 std::thread::sleep(TRANSPORT_BACKOFF);
                 continue;
             }
@@ -464,7 +464,7 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
                     pending_chunks.push(chunk);
                 }
                 Err(error) => {
-                    hub.record_error(format!("wechat: send failed: {error}"));
+                    mesh.record_error(format!("wechat: send failed: {error}"));
                 }
             }
         }
@@ -482,13 +482,13 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
             // runs, but replies cannot go out until the user's next inbound
             // message refreshes the context token. The OwnerLoop composes
             // the footer from this flag (💭 keeps the degraded shape).
-            hub.set_degraded(true);
+            mesh.set_degraded(true);
         } else if sent_count > 0 {
             // A successful send proves the token works again.
-            hub.set_degraded(false);
+            mesh.set_degraded(false);
         }
         if sent_count > 0 {
-            crate::wechat::hub::log(&format!("outbound drained {} chunks", sent_count));
+            crate::wechat::channel::log(&format!("outbound drained {} chunks", sent_count));
         }
 
         // ---- typing ticket refresh (cheap, every loop) ----
@@ -504,14 +504,14 @@ pub async fn run(hub: Arc<Hub>, ctx: BridgeContext) -> StopReason {
         }
 
         tokio_time(Duration::from_millis(300)).await;
-        lease_alive = hub.lease_alive();
+        lease_alive = mesh.lease_alive();
     }
 }
 
 /// Route one authorized inbound message (extracted from the poll loop so
 /// the abortable-poll code stays readable).
 async fn deliver(
-    hub: &Arc<Hub>,
+    mesh: &Arc<Channel>,
     ctx: &BridgeContext,
     incoming: crate::wechat::ilink::Incoming,
     context_token: Option<&str>,
@@ -522,7 +522,7 @@ async fn deliver(
             // Phone commands first (exact whitelist): they reply directly
             // over WeChat and never touch the agent lane or the batch.
             if let Some(command) = crate::wechat::phone::parse(&incoming.text) {
-                let reply = match crate::wechat::phone::execute(hub, command) {
+                let reply = match crate::wechat::phone::execute(mesh, command) {
                     Ok(text) => text,
                     Err(error) => format!("❌ {error}"),
                 };
@@ -532,23 +532,23 @@ async fn deliver(
                     .await;
                 return;
             }
-            handle_text(Arc::clone(hub), ctx, incoming.text, batch).await;
+            handle_text(Arc::clone(mesh), ctx, incoming.text, batch).await;
         }
         "image" => {
             if let Some(payload) = incoming.image {
-                handle_image(Arc::clone(hub), ctx, payload, context_token, batch).await;
+                handle_image(Arc::clone(mesh), ctx, payload, context_token, batch).await;
             }
         }
         "file" => {
             if let Some(payload) = incoming.file {
-                handle_file(Arc::clone(hub), ctx, payload, context_token, batch).await;
+                handle_file(Arc::clone(mesh), ctx, payload, context_token, batch).await;
             }
         }
         "voice" => {
-            handle_voice(Arc::clone(hub), ctx, incoming.voice, context_token, batch).await;
+            handle_voice(Arc::clone(mesh), ctx, incoming.voice, context_token, batch).await;
         }
         "video" => {
-            handle_video(Arc::clone(hub), ctx, context_token).await;
+            handle_video(Arc::clone(mesh), ctx, context_token).await;
         }
         _ => {}
     }
@@ -568,7 +568,7 @@ async fn tokio_time(duration: Duration) {
 /// side effect of the HTTP future's IO events, with no timing guarantee.
 /// Returns `Err(IlinkError::Cancelled)` when the lease died while waiting.
 async fn abortable_get_updates(
-    hub: &Arc<Hub>,
+    mesh: &Arc<Channel>,
     client: &IlinkClient,
     cursor: &str,
 ) -> Result<UpdatesPage, IlinkError> {
@@ -578,7 +578,7 @@ async fn abortable_get_updates(
         tokio::select! {
             page = &mut request => return page,
             _ = tokio::time::sleep(FACT_POLL) => {
-                if !hub.lease_alive() || hub.shutdown().requested() {
+                if !mesh.lease_alive() || mesh.shutdown().requested() {
                     // The request future is dropped here: the HTTP call is
                     // aborted mid-flight. The cursor was NOT advanced, so
                     // the new owner re-polls from the shared cursor and
@@ -594,10 +594,10 @@ async fn abortable_get_updates(
 /// Store-level lease hand-off used by `/wechat stop`: release and stop.
 /// The lease facade carries release; this is the only bridge-adjacent
 /// release path and it runs outside the OwnerLoop (user request).
-pub fn release_and_stop(hub: &Arc<Hub>) {
-    if let Some(lease) = hub.lease.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
-        let _ = hub.lease_owner.release("wechat", lease.generation);
+pub fn release_and_stop(mesh: &Arc<Channel>) {
+    if let Some(lease) = mesh.lease.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+        let _ = mesh.lease_owner.release("wechat", lease.generation);
     }
-    hub.set_lease_alive(false);
-    hub.request_shutdown();
+    mesh.set_lease_alive(false);
+    mesh.request_shutdown();
 }

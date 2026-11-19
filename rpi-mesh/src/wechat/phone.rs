@@ -8,15 +8,15 @@
 //! shows), so `/use 3` anchors to the list the user just saw. The lease
 //! hand-off goes through `LeaseAdmin` (the user-command path of the PR-2
 //! capability split) and works across machines: the store is the shared
-//! hub.db (or the relay RPC), so the target may be a remote instance.
+//! mesh.db (or the relay RPC), so the target may be a remote instance.
 
 use std::sync::Arc;
 
-use rpi_mesh_core::api::HubStore;
+use rpi_mesh_core::api::MeshStore;
 use rpi_mesh_core::lease::LeaseAdmin;
 use rpi_mesh_core::render::{render_instances_text, RenderContext};
 
-use crate::wechat::hub::Hub;
+use crate::wechat::channel::Channel;
 
 /// The parsed command. `Unknown` carries no marker — the caller falls through
 /// to the normal agent-injection path.
@@ -88,22 +88,22 @@ pub fn parse(text: &str) -> Option<WxCommand> {
 }
 
 /// `/instances` text: numbered rows (viewer = this instance) + lease footer.
-pub fn instances_text(hub: &Arc<Hub>, now: i64) -> Result<String, String> {
-    let instances = hub
+pub fn instances_text(mesh: &Arc<Channel>, now: i64) -> Result<String, String> {
+    let instances = mesh
         .store()
-        .list_instances_alive(now, crate::wechat::hub::ALIVE_MS)
+        .list_instances_alive(now, crate::wechat::channel::ALIVE_MS)
         .map_err(|e| e.to_string())?;
-    let holder = hub
+    let holder = mesh
         .lease_owner
         .holder("wechat")
         .map_err(|e| e.to_string())?
         .filter(|h| h.expires_at > now);
     let holder_node = holder.as_ref().map(|h| h.owner_node.clone());
     let viewer = RenderContext {
-        viewer_node_id: &hub.node_id(),
+        viewer_node_id: &mesh.node_id(),
         wechat_holder_node: holder_node.as_deref(),
         remote: !matches!(
-            hub.config().remote.mode,
+            mesh.config().remote.mode,
             rpi_mesh_core::config::RemoteMode::Local
         ),
     };
@@ -126,11 +126,11 @@ const STATUS_REPLY_WAIT_MS: u64 = 5_000;
 /// targets get a `cmd status` envelope (their worker replies with the text,
 /// which this bridge thread polls for, bounded) — so the phone always shows
 /// what it just handed the channel to.
-pub fn use_command(hub: &Arc<Hub>, arg: &str) -> Result<String, String> {
+pub fn use_command(mesh: &Arc<Channel>, arg: &str) -> Result<String, String> {
     let now = rpi_mesh_core::now_ms();
-    let instances = hub
+    let instances = mesh
         .store()
-        .list_instances_alive(now, crate::wechat::hub::ALIVE_MS)
+        .list_instances_alive(now, crate::wechat::channel::ALIVE_MS)
         .map_err(|e| e.to_string())?;
     if instances.is_empty() {
         return Err("没有登记的实例".to_string());
@@ -139,34 +139,34 @@ pub fn use_command(hub: &Arc<Hub>, arg: &str) -> Result<String, String> {
     // Self-target with a healthy lease of our own: nothing to do. Otherwise
     // fall through and assign — "/use self" is how the operator takes the
     // channel back when another instance holds it.
-    if target.node_id == hub.node_id() {
-        let mine = hub
+    if target.node_id == mesh.node_id() {
+        let mine = mesh
             .lease_owner
             .holder("wechat")
             .ok()
             .flatten()
-            .is_some_and(|h| h.owner_node == hub.node_id() && h.expires_at > now);
+            .is_some_and(|h| h.owner_node == mesh.node_id() && h.expires_at > now);
         if mine {
             return Ok(format!(
                 "微信接管已在本实例（{}），无需切换\n\n{}",
                 target.label(),
-                status_text(hub, now)
+                status_text(mesh, now)
             ));
         }
     }
     let admin = LeaseAdmin::new(
-        Arc::clone(&hub.store()) as Arc<dyn HubStore>,
-        hub.config().lease.ttl_ms(),
+        Arc::clone(&mesh.store()) as Arc<dyn MeshStore>,
+        mesh.config().lease.ttl_ms(),
     );
     let generation = admin.assign_to("wechat", &target, now)?;
     let confirmation = format!(
         "微信接管已切换到 {}（generation {generation}）",
         target.label()
     );
-    if target.node_id == hub.node_id() {
-        return Ok(format!("{confirmation}\n\n{}", status_text(hub, now)));
+    if target.node_id == mesh.node_id() {
+        return Ok(format!("{confirmation}\n\n{}", status_text(mesh, now)));
     }
-    match remote_status(hub, &target, now) {
+    match remote_status(mesh, &target, now) {
         Some(status) => Ok(format!("{confirmation}\n\n{status}")),
         None => Ok(format!(
             "{confirmation}\n（{}/status 暂未响应，稍后可用 /instances 查看）",
@@ -179,21 +179,21 @@ pub fn use_command(hub: &Arc<Hub>, arg: &str) -> Result<String, String> {
 /// the target's worker executes its intent and replies. Polls this node's
 /// inbox for the correlated reply and acks it. `None` on timeout.
 fn remote_status(
-    hub: &Arc<Hub>,
+    mesh: &Arc<Channel>,
     target: &rpi_mesh_core::store::InstanceView,
     now: i64,
 ) -> Option<String> {
     let correlation = rpi_mesh_core::protocol::new_id();
     let intent = rpi_mesh_core::protocol::CommandIntent::new("status");
     let envelope = rpi_mesh_core::protocol::Envelope::command(
-        &hub.node_id(),
-        &hub.name(),
+        &mesh.node_id(),
+        &mesh.name(),
         &target.node_id,
         intent,
         now,
     )
     .with_correlation(&correlation);
-    hub.store().send_envelope(&envelope).ok()?;
+    mesh.store().send_envelope(&envelope).ok()?;
 
     let deadline = now + STATUS_REPLY_WAIT_MS as i64;
     loop {
@@ -202,12 +202,12 @@ fn remote_status(
         if now_i >= deadline {
             return None;
         }
-        let inbox = hub.store().inbox(&hub.node_id(), now_i, 32).ok()?;
+        let inbox = mesh.store().inbox(&mesh.node_id(), now_i, 32).ok()?;
         for envelope in inbox {
             if envelope.kind == rpi_mesh_core::protocol::EnvelopeKind::Reply
                 && envelope.correlation.as_deref() == Some(correlation.as_str())
             {
-                let _ = hub.store().ack_envelope(&envelope.id, &hub.node_id(), now_i);
+                let _ = mesh.store().ack_envelope(&envelope.id, &mesh.node_id(), now_i);
                 let text = envelope.text.unwrap_or_default();
                 return Some(text);
             }
@@ -257,13 +257,13 @@ fn resolve_by_list(
 /// `/status`: this instance's facts — identity, model, session, cwd, busy,
 /// and where the wechat lease currently sits. All from the heartbeat-fed
 /// store + GetExecutionContext snapshot (no model turn spent).
-pub fn status_text(hub: &Arc<Hub>, now: i64) -> String {
+pub fn status_text(mesh: &Arc<Channel>, now: i64) -> String {
     // Facts come from the heartbeat-fed instances row (3s cadence): the same
     // data /instances shows, without spending a model turn.
-    let instance = hub.store().get_instance(&hub.node_id()).ok().flatten();
-    let holder = hub.lease_owner.holder("wechat").ok().flatten();
-    let mine = holder.as_ref().is_some_and(|h| h.owner_node == hub.node_id());
-    let mut lines = vec![format!("实例: {}", hub.label())];
+    let instance = mesh.store().get_instance(&mesh.node_id()).ok().flatten();
+    let holder = mesh.lease_owner.holder("wechat").ok().flatten();
+    let mine = holder.as_ref().is_some_and(|h| h.owner_node == mesh.node_id());
+    let mut lines = vec![format!("实例: {}", mesh.label())];
     if let Some(model) = instance.as_ref().and_then(|i| i.model.as_deref()) {
         lines.push(format!("模型: {model}"));
     }
@@ -316,15 +316,15 @@ const HELP: &str = "微信命令（直接发送，不经过 AI）:\n\
 /// Assemble the core SpawnContext for the wechat plugin. `cwd_override`
 /// wins; otherwise the bound instance's cwd (the phone's "start here").
 fn start_ctx<'a>(
-    hub: &'a Arc<Hub>,
+    mesh: &'a Arc<Channel>,
     cwd_override: Option<&'a str>,
-    store_dyn: &'a Arc<dyn HubStore>,
+    store_dyn: &'a Arc<dyn MeshStore>,
 ) -> rpi_mesh_core::instance_start::SpawnContext<'a> {
     let cwd = match cwd_override.filter(|s| !s.trim().is_empty()) {
         Some(arg) => arg.to_string(),
-        None => hub
+        None => mesh
             .store()
-            .get_instance(&hub.node_id())
+            .get_instance(&mesh.node_id())
             .ok()
             .flatten()
             .map(|v| v.cwd)
@@ -332,26 +332,26 @@ fn start_ctx<'a>(
     };
     rpi_mesh_core::instance_start::SpawnContext {
         store: store_dyn,
-        node_id: &hub.node_id(),
-        host: &hub.mesh.host,
+        node_id: &mesh.node_id(),
+        host: &mesh.mesh.host,
         cwd,
-        spawn: &hub.config().instance_spawn,
+        spawn: &mesh.config().instance_spawn,
     }
 }
 
-/// Execute a parsed command on the hub and return the reply text.
-pub fn execute(hub: &Arc<Hub>, command: WxCommand) -> Result<String, String> {
+/// Execute a parsed command on the mesh and return the reply text.
+pub fn execute(mesh: &Arc<Channel>, command: WxCommand) -> Result<String, String> {
     let now = rpi_mesh_core::now_ms();
     match command {
-        WxCommand::Instances => instances_text(hub, now),
+        WxCommand::Instances => instances_text(mesh, now),
         WxCommand::Use(None) => {
-            let mut text = instances_text(hub, now)?;
+            let mut text = instances_text(mesh, now)?;
             text.push_str("\n\n回复 /use <编号> 切换微信接管");
             Ok(text)
         }
-        WxCommand::Use(Some(arg)) => use_command(hub, &arg),
+        WxCommand::Use(Some(arg)) => use_command(mesh, &arg),
         WxCommand::New => {
-            let result = hub.action(
+            let result = mesh.action(
                 rpi_plugin_sdk::RuntimeActionId::NewSession,
                 serde_json::json!({}),
             )?;
@@ -361,17 +361,17 @@ pub fn execute(hub: &Arc<Hub>, command: WxCommand) -> Result<String, String> {
                 .unwrap_or("(新)");
             Ok(format!("已开启新会话 {session}"))
         }
-        WxCommand::Status => Ok(status_text(hub, now)),
+        WxCommand::Status => Ok(status_text(mesh, now)),
         WxCommand::Help => Ok(HELP.to_string()),
         WxCommand::Start(cwd) => {
-            let store_dyn = Arc::clone(&hub.store()) as Arc<dyn HubStore>;
-            let spawn_ctx = start_ctx(hub, cwd.as_deref(), &store_dyn);
+            let store_dyn = Arc::clone(&mesh.store()) as Arc<dyn MeshStore>;
+            let spawn_ctx = start_ctx(mesh, cwd.as_deref(), &store_dyn);
             rpi_mesh_core::instance_start::start(&spawn_ctx, cwd.as_deref())
         }
         WxCommand::Stop(query) => {
             let now = rpi_mesh_core::now_ms();
-            let store_dyn = Arc::clone(&hub.store()) as Arc<dyn HubStore>;
-            let spawn_ctx = start_ctx(hub, None, &store_dyn);
+            let store_dyn = Arc::clone(&mesh.store()) as Arc<dyn MeshStore>;
+            let spawn_ctx = start_ctx(mesh, None, &store_dyn);
             rpi_mesh_core::instance_start::stop(&spawn_ctx, &query, now)
         }
     }

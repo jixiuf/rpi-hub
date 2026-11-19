@@ -1,4 +1,4 @@
-//! Footer status helpers shared by the hub and wechat plugins.
+//! Footer status helpers shared by the mesh and wechat plugins.
 //!
 //! The footer's wechat slot uses an emoji-bubble glyph family (see below).
 

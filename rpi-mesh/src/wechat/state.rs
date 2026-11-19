@@ -1,4 +1,4 @@
-//! Persisted WeChat credentials + bridge state (`wechat/` under the hub dir).
+//! Persisted WeChat credentials + bridge state (`wechat/` under the mesh dir).
 //!
 //! Files are 0600; the directory is 0700. Nothing sensitive is ever logged.
 
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use rpi_mesh_core::paths;
 use rpi_mesh_core::Result;
 
-/// Wechat state directory: `<hub dir>/wechat`.
+/// Wechat state directory: `<mesh dir>/wechat`.
 pub fn wechat_dir(dir: &Path) -> PathBuf {
     paths::wechat_dir(dir)
 }

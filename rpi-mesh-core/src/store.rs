@@ -1,6 +1,6 @@
-//! The multi-process hub store.
+//! The multi-process mesh store.
 //!
-//! Everything the hub needs is four tables in one SQLite database (WAL mode):
+//! Everything the mesh needs is four tables in one SQLite database (WAL mode):
 //!
 //! | table | purpose |
 //! | --- | --- |
@@ -22,9 +22,9 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
-use crate::api::HubStore;
+use crate::api::MeshStore;
 use crate::protocol::{Envelope, MAX_TEXT_BYTES};
-use crate::{names, paths, HubError, Result};
+use crate::{names, paths, MeshError, Result};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS kv (
@@ -221,7 +221,7 @@ impl Store {
     pub fn open(dir: &Path) -> Result<Self> {
         paths::ensure_private_dir(dir)?;
         let path = paths::db_path(dir);
-        let mut last: Option<HubError> = None;
+        let mut last: Option<MeshError> = None;
         for attempt in 0..40u64 {
             match Self::open_once(dir, &path) {
                 Ok(store) => {
@@ -237,7 +237,7 @@ impl Store {
             }
             std::thread::sleep(Duration::from_millis(25 + 25 * attempt.min(4)));
         }
-        Err(last.unwrap_or_else(|| HubError::invalid("could not open the hub database")))
+        Err(last.unwrap_or_else(|| MeshError::invalid("could not open the mesh database")))
     }
 
     fn open_once(dir: &Path, path: &Path) -> Result<Self> {
@@ -341,8 +341,8 @@ impl Store {
             Some(version) => {
                 let version: i64 = version.parse().unwrap_or(0);
                 if version > SCHEMA_VERSION {
-                    return Err(HubError::invalid(format!(
-                        "hub database schema is version {version}, this build understands {SCHEMA_VERSION}; upgrade rpi-hub"
+                    return Err(MeshError::invalid(format!(
+                        "mesh database schema is version {version}, this build understands {SCHEMA_VERSION}; upgrade rpi-mesh"
                     )));
                 }
             }
@@ -534,15 +534,15 @@ impl Store {
     }
 
 
-    /// Concrete-`Store` convenience forwards to the `HubStore` defaults so
-    /// both plugins (wechat holds `Arc<Store>`, hub holds `Arc<dyn HubStore>`)
+    /// Concrete-`Store` convenience forwards to the `MeshStore` defaults so
+    /// both plugins (wechat holds `Arc<Store>`, mesh holds `Arc<dyn MeshStore>`)
     /// get the identical alive-filtered views.
     pub fn list_instances_alive(&self, now: i64, alive_ms: i64) -> Result<Vec<InstanceView>> {
-        HubStore::list_instances_alive(self, now, alive_ms)
+        MeshStore::list_instances_alive(self, now, alive_ms)
     }
 
     pub fn get_instance_alive(&self, node_id: &str) -> Result<Option<InstanceView>> {
-        HubStore::get_instance_alive(self, node_id)
+        MeshStore::get_instance_alive(self, node_id)
     }
 
     pub fn get_instance(&self, node_id: &str) -> Result<Option<InstanceView>> {
@@ -761,13 +761,13 @@ impl Store {
             )
             .optional()?;
         let Some((owner_node, owner_name, generation)) = existing else {
-            return Err(HubError::invalid(format!(
+            return Err(MeshError::invalid(format!(
                 "no lease for capability {capability:?}; claim it first"
             )));
         };
         if let Some((from_node, from_gen)) = from {
             if from_node != owner_node || from_gen != generation {
-                return Err(HubError::invalid(format!(
+                return Err(MeshError::invalid(format!(
                     "lease {capability:?} is held by {owner_name} (generation {generation})"
                 )));
             }
@@ -1086,7 +1086,7 @@ impl Store {
 /// `BEGIN IMMEDIATE` can still return SQLITE_BUSY under a burst of writers
 /// (eight instances starting at once is enough), so back off and retry.
 fn retry_busy<T>(mut op: impl FnMut() -> Result<T>) -> Result<T> {
-    let mut last: Option<HubError> = None;
+    let mut last: Option<MeshError> = None;
     for attempt in 0..20u64 {
         match op() {
             Ok(value) => return Ok(value),
@@ -1097,13 +1097,13 @@ fn retry_busy<T>(mut op: impl FnMut() -> Result<T>) -> Result<T> {
             Err(error) => return Err(error),
         }
     }
-    Err(last.unwrap_or_else(|| HubError::invalid("database stayed locked")))
+    Err(last.unwrap_or_else(|| MeshError::invalid("database stayed locked")))
 }
 
 /// Best-effort hostname without an extra dependency. Also used by the
 /// dead-pid reaper to scope `kill(pid, 0)` probes to this machine.
 pub fn local_host_name() -> String {
-    for key in ["RPI_HUB_HOST", "HOSTNAME", "HOST", "COMPUTERNAME"] {
+    for key in ["RPI_MESH_HOST", "HOSTNAME", "HOST", "COMPUTERNAME"] {
         if let Ok(value) = std::env::var(key) {
             let value = value.trim();
             if !value.is_empty() {
@@ -1144,10 +1144,10 @@ pub fn pid_alive(_pid: u32) -> bool {
     true
 }
 
-fn is_lock_contention(error: &HubError) -> bool {
+fn is_lock_contention(error: &MeshError) -> bool {
     matches!(
         error,
-        HubError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+        MeshError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
             if matches!(
                 code.code,
                 rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked

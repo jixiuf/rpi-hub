@@ -1,9 +1,9 @@
 //! Tools exposed to the model.
 //!
 //! Two shapes share the ABI lifecycle:
-//! - **sync** (`hub_instances`, `hub_send`, `hub_switch`): the outcome is known
+//! - **sync** (`mesh_instances`, `mesh_send`, `mesh_switch`): the outcome is known
 //!   in `execute`, `poll` reports it once.
-//! - **wait** (`hub_cmd`, `hub_ask`): `execute` sends the envelope and returns a
+//! - **wait** (`mesh_ask`): `execute` sends the envelope and returns a
 //!   handle holding a correlation id; `poll` checks the reply mailbox without
 //!   blocking, until the deadline.
 
@@ -18,7 +18,7 @@ use rpi_plugin_sdk::{
     PluginApi, StableToolSchema, StepHandle, StepResult, StbString, ToolPartialCb,
 };
 
-use crate::hub::{self, Hub, ALIVE_MS};
+use crate::mesh::{self, Mesh, ALIVE_MS};
 
 const DEFAULT_ASK_TIMEOUT_S: u64 = 300;
 const MAX_ASK_TIMEOUT_S: u64 = 900;
@@ -67,7 +67,7 @@ extern "C" fn sync_poll(
 ) -> StepResult {
     rpi_plugin_sdk::guard(|| {
         let Some(entry) = SYNC.get(handle) else {
-            return error_result("invalid or destroyed hub handle".into());
+            return error_result("invalid or destroyed mesh handle".into());
         };
         if entry.cancelled.load(std::sync::atomic::Ordering::Acquire) {
             return error_result("cancelled".into());
@@ -79,7 +79,7 @@ extern "C" fn sync_poll(
             None => StepResult::pending(StbString::empty()),
         }
     })
-    .unwrap_or_else(|_| error_result("rpi-hub sync poll panicked".into()))
+    .unwrap_or_else(|_| error_result("rpi-mesh sync poll panicked".into()))
 }
 
 extern "C" fn sync_cancel(handle: StepHandle) {
@@ -117,11 +117,11 @@ extern "C" fn wait_poll(
         };
 
         if check {
-            let hub = match hub::current() {
-                Some(hub) => hub,
-                None => return error_result("rpi-hub is not loaded".into()),
+            let mesh = match mesh::current() {
+                Some(mesh) => mesh,
+                None => return error_result("rpi-mesh is not loaded".into()),
             };
-            let outcome = hub.take_reply(&correlation);
+            let outcome = mesh.take_reply(&correlation);
             if let Some(reply) = outcome {
                 WAIT.remove(handle);
                 return if reply.ok {
@@ -134,14 +134,14 @@ extern "C" fn wait_poll(
 
         if now >= deadline {
             WAIT.remove(handle);
-            if let Some(hub) = hub::current() {
-                hub.forget_reply(&correlation);
+            if let Some(mesh) = mesh::current() {
+                mesh.forget_reply(&correlation);
             }
             return error_result("等待目标实例回复超时".into());
         }
         StepResult::pending(StbString::empty())
     })
-    .unwrap_or_else(|_| error_result("rpi-hub wait poll panicked".into()))
+    .unwrap_or_else(|_| error_result("rpi-mesh wait poll panicked".into()))
 }
 
 extern "C" fn wait_cancel(handle: StepHandle) {
@@ -166,11 +166,11 @@ struct ToolDef {
     destroy: rpi_plugin_sdk::ToolDestroyFn,
 }
 
-pub fn register(hub: &Arc<Hub>, api: &PluginApi) -> Result<(), String> {
+pub fn register(mesh: &Arc<Mesh>, api: &PluginApi) -> Result<(), String> {
     let Some(register_tool) = api.register_tool else {
         return Err("host has no tool registrar".into());
     };
-    let _ = hub;
+    let _ = mesh;
     for def in definitions() {
         let schema = Box::new(StableToolSchema {
             name: StbString::from_string(def.name.to_string()),
@@ -195,7 +195,7 @@ pub fn register(hub: &Arc<Hub>, api: &PluginApi) -> Result<(), String> {
 fn definitions() -> Vec<ToolDef> {
     vec![
         ToolDef {
-            name: "hub_instances",
+            name: "mesh_instances",
             description: "List running rpi instances (this machine and remote), which one owns the WeChat channel, and each instance's session/busy state.",
             parameters: r#"{"type":"object","properties":{},"additionalProperties":false}"#,
             execute: instances_execute,
@@ -204,7 +204,7 @@ fn definitions() -> Vec<ToolDef> {
             destroy: sync_destroy,
         },
         ToolDef {
-            name: "hub_send",
+            name: "mesh_send",
             description: "Send a message into another rpi instance's agent lane. Use it to hand work to an instance that runs in a different network (office vs server) and let it act with its own environment.",
             parameters: r#"{"type":"object","properties":{"target":{"type":"string","description":"Instance name, name@host, or node id prefix"},"text":{"type":"string","description":"Message for the target agent"}},"required":["target","text"],"additionalProperties":false}"#,
             execute: send_execute,
@@ -213,7 +213,7 @@ fn definitions() -> Vec<ToolDef> {
             destroy: sync_destroy,
         },
         ToolDef {
-            name: "hub_ask",
+            name: "mesh_ask",
             description: "Delegate a task to another rpi instance and wait for its answer. The target works in its own session, network and filesystem, then returns the assistant's final text.",
             parameters: r#"{"type":"object","properties":{"target":{"type":"string"},"task":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":10,"maximum":900}},"required":["target","task"],"additionalProperties":false}"#,
             execute: ask_execute,
@@ -222,7 +222,7 @@ fn definitions() -> Vec<ToolDef> {
             destroy: wait_destroy,
         },
         ToolDef {
-            name: "hub_switch",
+            name: "mesh_switch",
             description: "Move ownership of a channel (default wechat) to another instance. Only the owner talks to WeChat, so this is how the mobile connection follows you between machines.",
             parameters: r#"{"type":"object","properties":{"target":{"type":"string"},"capability":{"type":"string","description":"channel id, default wechat"}},"required":["target"],"additionalProperties":false}"#,
             execute: switch_execute,
@@ -237,8 +237,8 @@ fn definitions() -> Vec<ToolDef> {
 // Tool bodies
 // ---------------------------------------------------------------------------
 
-fn require_hub() -> Result<Arc<Hub>, String> {
-    hub::current().ok_or_else(|| "rpi-hub is not initialized".to_string())
+fn require_mesh() -> Result<Arc<Mesh>, String> {
+    mesh::current().ok_or_else(|| "rpi-mesh is not initialized".to_string())
 }
 
 fn parse_params(params: &str) -> serde_json::Value {
@@ -262,8 +262,8 @@ rpi_plugin_sdk::execute_handler! {
 }
 
 fn run_instances(_params: &str) -> Result<String, String> {
-    let hub = require_hub()?;
-    hub.format_instances(now_ms())
+    let mesh = require_mesh()?;
+    mesh.format_instances(now_ms())
 }
 
 rpi_plugin_sdk::execute_handler! {
@@ -274,14 +274,14 @@ rpi_plugin_sdk::execute_handler! {
 }
 
 fn run_send(params: &str) -> Result<String, String> {
-    let hub = require_hub()?;
+    let mesh = require_mesh()?;
     let params = parse_params(params);
-    let target = hub.resolve_target(param_str(&params, "target")?)?;
+    let target = mesh.resolve_target(param_str(&params, "target")?)?;
     let text = param_str(&params, "text")?;
     let envelope =
-        Envelope::text(&hub.node_id, &hub.name(), &target.node_id, text, now_ms())
+        Envelope::text(&mesh.node_id, &mesh.name(), &target.node_id, text, now_ms())
             .map_err(|e| e.to_string())?;
-    hub.deliver(envelope)?;
+    mesh.deliver(envelope)?;
     Ok(format!("已发送给 {}", target.label()))
 }
 
@@ -300,9 +300,9 @@ rpi_plugin_sdk::execute_handler! {
 }
 
 fn run_ask(params: &str) -> Result<(String, i64), String> {
-    let hub = require_hub()?;
+    let mesh = require_mesh()?;
     let params = parse_params(params);
-    let target = hub.resolve_target(param_str(&params, "target")?)?;
+    let target = mesh.resolve_target(param_str(&params, "target")?)?;
     let task = param_str(&params, "task")?;
     let timeout = params
         .get("timeoutSeconds")
@@ -311,11 +311,11 @@ fn run_ask(params: &str) -> Result<(String, i64), String> {
         .clamp(10, MAX_ASK_TIMEOUT_S);
 
     let correlation = rpi_mesh_core::protocol::new_id();
-    let envelope = Envelope::text(&hub.node_id, &hub.name(), &target.node_id, task, now_ms())
+    let envelope = Envelope::text(&mesh.node_id, &mesh.name(), &target.node_id, task, now_ms())
         .map_err(|e| e.to_string())?
         .with_correlation(&correlation);
-    hub.expect_reply(&correlation);
-    hub.deliver(envelope)?;
+    mesh.expect_reply(&correlation);
+    mesh.deliver(envelope)?;
     Ok((correlation, (timeout as i64) * 1000))
 }
 
@@ -328,9 +328,9 @@ rpi_plugin_sdk::execute_handler! {
 }
 
 fn run_switch(params: &str) -> Result<String, String> {
-    let hub = require_hub()?;
+    let mesh = require_mesh()?;
     let params = parse_params(params);
-    let target = hub.resolve_target(param_str(&params, "target")?)?;
+    let target = mesh.resolve_target(param_str(&params, "target")?)?;
     let capability = params
         .get("capability")
         .and_then(|v| v.as_str())
@@ -338,8 +338,8 @@ fn run_switch(params: &str) -> Result<String, String> {
         .filter(|v| !v.is_empty())
         .unwrap_or("wechat");
     let admin = rpi_mesh_core::lease::LeaseAdmin::new(
-        Arc::clone(&hub.store),
-        hub.config.lease.ttl_ms(),
+        Arc::clone(&mesh.store),
+        mesh.config.lease.ttl_ms(),
     );
     let generation = admin.assign_to(capability, &target, now_ms())?;
     Ok(describe_transfer(capability, &target.label(), generation))
@@ -349,9 +349,9 @@ fn describe_transfer(capability: &str, label: &str, generation: i64) -> String {
     format!("{capability} 接管已切换到 {label}（generation {generation}）")
 }
 
-/// Format the lease table for `/hub who`.
-pub fn format_leases(hub: &Hub) -> Result<String, String> {
-    let leases = hub.lease_observer.all().map_err(|e| e.to_string())?;
+/// Format the lease table for `/mesh who`.
+pub fn format_leases(mesh: &Mesh) -> Result<String, String> {
+    let leases = mesh.lease_observer.all().map_err(|e| e.to_string())?;
     if leases.is_empty() {
         return Ok("没有任何接管租约".to_string());
     }
@@ -370,8 +370,8 @@ pub fn format_leases(hub: &Hub) -> Result<String, String> {
 }
 
 /// Exposed for the command layer's `/instances` reuse.
-pub fn instances_text(hub: &Hub) -> Result<String, String> {
-    hub.format_instances(now_ms())
+pub fn instances_text(mesh: &Mesh) -> Result<String, String> {
+    mesh.format_instances(now_ms())
 }
 
 #[allow(dead_code)]
