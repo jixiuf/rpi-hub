@@ -57,4 +57,4 @@ HTTP/SSE 与 ACP 前端，负责 `ownsStdio`、监听生命周期、认证（`RP
 | 跨机调研（有实例） | `hub_send` / `hub_ask` 走信箱，保留对方会话上下文；双向对称（office⇄server 均可发起）|
 | 跨机（无实例） | 先在远端跑一个 rpi 实例（relay client 连回主 hub），再 `hub_ask`——一次性 ssh 任务通道（`hub_run`）已移除，系统无 ssh 依赖 |
 
-`hub_run` 覆盖没有实例在跑的机器（用远端自己的 `~/.rpi` 配置和网络）；有实例时优先 `hub_ask` 走信箱。relay 与 `hub_run` 均已真机验证。
+无实例的远端机器先跑一个 rpi 实例（relay client 连回主 hub）再走信箱。relay 已真机验证（apmprod）。
