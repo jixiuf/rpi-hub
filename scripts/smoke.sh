@@ -28,8 +28,8 @@ if ! command -v sqlite3 >/dev/null 2>&1; then
   exit 0
 fi
 
-echo "==> building rpi-hub"
-cargo build -p rpi-hub --manifest-path "$HERE/Cargo.toml" >/dev/null
+echo "==> building rpi-mesh"
+cargo build -p rpi-mesh --manifest-path "$HERE/Cargo.toml" >/dev/null
 
 WORK="$(mktemp -d)"
 HUB_DIR="$WORK/hub"
@@ -37,10 +37,9 @@ DB="$HUB_DIR/hub.db"
 LOG="$HUB_DIR/logs/hub.log"
 PIDS=()
 
-# The wechat lease is claimed by the rpi-wechat plugin's watcher (not the hub
-# worker — the hub only observes now). It claims only when credentials exist
-# and the bridge is not disabled: seed a dummy credential file. No network is
-# touched — the claim path never calls iLink.
+# The wechat lease is claimed by the mesh plugin's watcher. It claims only
+# when credentials exist and the bridge is not disabled: seed a dummy
+# credential file. No network is touched — the claim path never calls iLink.
 mkdir -p "$HUB_DIR/wechat"
 cat > "$HUB_DIR/wechat/credentials.json" <<'JSON'
 {"token": "smoke-dummy", "baseUrl": "http://127.0.0.1:1", "userId": "smoke-user", "savedAt": 0}

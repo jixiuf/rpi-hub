@@ -93,9 +93,9 @@ checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
 name = "bytes"
-version = "1.12.1"
+version = "1.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
 
 [[package]]
 name = "cc"
@@ -877,9 +877,9 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rand_pcg"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
+checksum = "eb95882a1e14462c69aea9984bb261293ccfe6022ef8de0eda18bd5afb0052df"
 dependencies = [
  "rand_core 0.10.1",
 ]
@@ -937,18 +937,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "rpi-hub"
+name = "rpi-mesh"
 version = "0.1.0"
 dependencies = [
- "rpi-hub-core",
+ "aes",
+ "base64 0.22.1",
+ "ecb",
+ "libc",
+ "md-5",
+ "qrcode",
+ "rand 0.8.8",
+ "reqwest",
+ "rpi-mesh-core",
  "rpi-plugin-sdk",
  "serde",
  "serde_json",
+ "tokio",
  "uuid",
 ]
 
 [[package]]
-name = "rpi-hub-core"
+name = "rpi-mesh-core"
 version = "0.1.0"
 dependencies = [
  "libc",
@@ -965,26 +974,6 @@ name = "rpi-plugin-sdk"
 version = "0.26.0"
 dependencies = [
  "serde_json",
-]
-
-[[package]]
-name = "rpi-wechat"
-version = "0.1.0"
-dependencies = [
- "aes",
- "base64 0.22.1",
- "ecb",
- "md-5",
- "qrcode",
- "rand 0.8.8",
- "reqwest",
- "rpi-hub-core",
- "rpi-plugin-sdk",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -1699,9 +1688,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.9.1"
+version = "1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+checksum = "85ccff8a4805aba1eaa4cd4afcd49f7557dd2cf5fd79ffc37f8959466effc5aa"
 
 [[package]]
 name = "zerotrie"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["rpi-hub-core", "rpi-hub", "rpi-wechat"]
+members = ["rpi-mesh-core", "rpi-mesh"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,7 +8,7 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-rpi-hub-core = { path = "rpi-hub-core" }
+rpi-mesh-core = { path = "rpi-mesh-core" }
 # NOTE: uses the local patched SDK (register_argument_suggester, pi-rust PR);
 # switch back to crates.io "=0.25" once that lands.
 rpi-plugin-sdk = { path = "/Users/jixiuf/repos/pi-rust/crates/rpi-plugin-sdk" }

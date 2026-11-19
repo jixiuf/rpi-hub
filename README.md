@@ -10,7 +10,7 @@ rpi 的多实例协同：实例发现、互相发消息/指令、任务委派，
 
 ```
 rpi-hub/
-├── rpi-hub-core/   # 共享库：身份、SQLite store、租约、信封协议、relay wire（无 ABI）
+├── rpi-mesh-core/   # 共享库：身份、SQLite store、租约、信封协议、relay wire（无 ABI）
 ├── rpi-hub/        # cdylib 插件：tools / 斜杠命令 / 事件 / 后台 worker / 实例启停
 └── rpi-wechat/     # cdylib 插件：微信文字通道（iLink，QR 登录）
 ```
@@ -50,8 +50,8 @@ rpi install --path ./rpi-wechat      # 微信文字通道
 > 已在 pi-rust main 修复（7697ca8）。0.23 上手动安装：
 > ```bash
 > cargo build --release -p rpi-hub
-> rm ~/.rpi/agent/extensions/librpi_hub.dylib   # macos 上务必先删旧文件再拷贝：
-> cp target/release/librpi_hub.dylib ~/.rpi/agent/extensions/   # 原地覆盖同一文件会让新进程映射到旧的签名页缓存，直接 SIGKILL；linux 是 .so，无此问题
+> rm ~/.rpi/agent/extensions/librpi_mesh.dylib   # macos 上务必先删旧文件再拷贝：
+> cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/   # 原地覆盖同一文件会让新进程映射到旧的签名页缓存，直接 SIGKILL；linux 是 .so，无此问题
 > ```
 
 ## 工具（给模型用）

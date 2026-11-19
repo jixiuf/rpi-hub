@@ -15,24 +15,24 @@ INSTALLED := $(PLUGINS:%=$(EXT_DIR)/lib%.dylib)
 .DEFAULT_GOAL := help
 
 build: ## cargo build --release for both plugins
-	cargo build --release -p rpi-hub -p rpi-wechat
+	cargo build --release -p rpi-mesh
 
 install: build ## build + replace the installed dylibs (rm first — see note above)
-	rm -f $(EXT_DIR)/librpi_hub.dylib $(EXT_DIR)/librpi_wechat.dylib
-	cp target/release/librpi_hub.dylib target/release/librpi_wechat.dylib $(EXT_DIR)/
-	@codesign -v $(EXT_DIR)/librpi_hub.dylib $(EXT_DIR)/librpi_wechat.dylib \
+	rm -f $(EXT_DIR)/librpi_mesh.dylib $(EXT_DIR)/librpi_mesh.dylib
+	cp target/release/librpi_mesh.dylib target/release/librpi_mesh.dylib $(EXT_DIR)/
+	@codesign -v $(EXT_DIR)/librpi_mesh.dylib $(EXT_DIR)/librpi_mesh.dylib \
 		&& echo "installed → $(EXT_DIR)" \
 		|| echo "warning: codesign check failed"
 
 reinstall: ## copy already-built dylibs without rebuilding
-	rm -f $(EXT_DIR)/librpi_hub.dylib $(EXT_DIR)/librpi_wechat.dylib
-	cp target/release/librpi_hub.dylib target/release/librpi_wechat.dylib $(EXT_DIR)/
-	@codesign -v $(EXT_DIR)/librpi_hub.dylib $(EXT_DIR)/librpi_wechat.dylib \
+	rm -f $(EXT_DIR)/librpi_mesh.dylib $(EXT_DIR)/librpi_mesh.dylib
+	cp target/release/librpi_mesh.dylib target/release/librpi_mesh.dylib $(EXT_DIR)/
+	@codesign -v $(EXT_DIR)/librpi_mesh.dylib $(EXT_DIR)/librpi_mesh.dylib \
 		&& echo "installed → $(EXT_DIR)" \
 		|| echo "warning: codesign check failed"
 
 test: ## run the workspace unit tests
-	cargo test -p rpi-hub-core -p rpi-hub -p rpi-wechat --locked --lib
+	cargo test -p rpi-mesh-core -p rpi-mesh --locked --lib
 
 smoke: ## end-to-end against a real rpi binary (RPI_BIN to override)
 	scripts/smoke.sh $(RPI_BIN)

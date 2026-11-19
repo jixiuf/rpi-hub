@@ -7,7 +7,7 @@
 
 - 插件是 **Rust `cdylib`**，宿主用 `libloading` 加载，只查找一个符号 `rpi_plugin_register`。
 - 依赖只允许 `rpi-plugin-sdk`（ABI 契约）。**不要**链接 `rpi-cli` / `rpi-extensions` / `rpi-harness`。
-- 需要共享代码时用普通 `rlib`（本仓库的 `rpi-hub-core`），不要让它依赖宿主。
+- 需要共享代码时用普通 `rlib`（本仓库的 `rpi-mesh-core`），不要让它依赖宿主。
 
 ```toml
 [package]
