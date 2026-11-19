@@ -62,7 +62,7 @@ rpi_plugin_sdk::export_plugin!(|api| {
     // One handler serves every instance-targeting command; skipped silently
     // on hosts without the slot (older rpi).
     if let Some(register_suggester) = api.register_argument_suggester {
-        for command in ["msg", "cmd", "ask", "use"] {
+        for command in ["msg", "ask", "use"] {
             let rc = register_suggester(
                 rpi_plugin_sdk::StbStringRef::from_str(command),
                 suggest::suggest_arguments,

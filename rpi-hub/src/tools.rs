@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use rpi_hub_core::protocol::{CommandIntent, Envelope};
+use rpi_hub_core::protocol::Envelope;
 use rpi_hub_core::store::LeaseHolder;
 use rpi_hub_core::now_ms;
 use rpi_plugin_sdk::callbacks::free_string;
@@ -19,11 +19,9 @@ use rpi_plugin_sdk::{
 };
 
 use crate::host::{self, Hub, ALIVE_MS};
-use crate::intent;
 
 const DEFAULT_ASK_TIMEOUT_S: u64 = 300;
 const MAX_ASK_TIMEOUT_S: u64 = 900;
-const COMMAND_TIMEOUT_MS: i64 = 60_000;
 const POLL_INTERVAL_MS: i64 = 250;
 
 // ---------------------------------------------------------------------------
@@ -215,15 +213,6 @@ fn definitions() -> Vec<ToolDef> {
             destroy: sync_destroy,
         },
         ToolDef {
-            name: "hub_cmd",
-            description: "Run an administrative command on another rpi instance (new, fork, compact, reload, model, thinking, name, stop, status) and return its result.",
-            parameters: r#"{"type":"object","properties":{"target":{"type":"string"},"command":{"type":"string","description":"e.g. '/new', '/reload', 'model sonnet'"}},"required":["target","command"],"additionalProperties":false}"#,
-            execute: cmd_execute,
-            poll: wait_poll,
-            cancel: wait_cancel,
-            destroy: wait_destroy,
-        },
-        ToolDef {
             name: "hub_ask",
             description: "Delegate a task to another rpi instance and wait for its answer. The target works in its own session, network and filesystem, then returns the assistant's final text.",
             parameters: r#"{"type":"object","properties":{"target":{"type":"string"},"task":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":10,"maximum":900}},"required":["target","task"],"additionalProperties":false}"#,
@@ -296,45 +285,6 @@ fn run_send(params: &str) -> Result<String, String> {
     Ok(format!("已发送给 {}", target.label()))
 }
 
-rpi_plugin_sdk::execute_handler! {
-    fn cmd_execute(_call_id, params) {
-        match run_cmd(&params.to_string_lossy()) {
-            Ok(CmdOutcome::Local(text)) => SYNC.insert(SyncDrive { outcome: Some(Ok(text)) }),
-            Ok(CmdOutcome::Remote { correlation }) => WAIT.insert(WaitDrive {
-                correlation,
-                deadline: now_ms() + COMMAND_TIMEOUT_MS,
-                last_check: 0,
-            }),
-            Err(error) => SYNC.insert(SyncDrive { outcome: Some(Err(error)) }),
-        }
-    }
-}
-
-enum CmdOutcome {
-    Local(String),
-    Remote { correlation: String },
-}
-
-fn run_cmd(params: &str) -> Result<CmdOutcome, String> {
-    let hub = require_hub()?;
-    let params = parse_params(params);
-    let target = hub.resolve_target(param_str(&params, "target")?)?;
-    let intent = CommandIntent::parse(param_str(&params, "command")?).map_err(|e| e.to_string())?;
-
-    if target.node_id == hub.node_id {
-        return Err(format!(
-            "目标是自己（{}）——hub_cmd 用于控制其他实例。管理命令直接用 TUI 斜杠命令执行",
-            target.label()
-        ));
-    }
-
-    let correlation = rpi_hub_core::protocol::new_id();
-    let envelope = Envelope::command(&hub.node_id, &hub.name(), &target.node_id, intent, now_ms())
-        .with_correlation(&correlation);
-    hub.expect_reply(&correlation);
-    hub.deliver(envelope)?;
-    Ok(CmdOutcome::Remote { correlation })
-}
 
 rpi_plugin_sdk::execute_handler! {
     fn ask_execute(_call_id, params) {

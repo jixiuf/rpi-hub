@@ -4,7 +4,6 @@
 //! built-in defaults. A corrupt file is kept (renamed to `config.json.broken`)
 //! and replaced with defaults: a broken config must never stop the hub.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};

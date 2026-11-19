@@ -60,7 +60,6 @@ rpi install --path ./rpi-wechat      # 微信文字通道
 | --- | --- |
 | `hub_instances` | 列出实例（本机/远程、cwd、会话、忙闲）与微信接管者 |
 | `hub_send` | 把消息投进目标实例的 agent 输入队列（让它在自己网络/文件系统里干活） |
-| `hub_cmd` | 在目标实例执行 `new/fork/compact/reload/model/thinking/name/stop/status` |
 | `hub_ask` | 委派任务并等待目标实例的最终回答（跨网络调研的主力） |
 | `hub_switch` | 把某个渠道（默认 `wechat`）的接管切到目标实例 |
 
@@ -70,7 +69,6 @@ rpi install --path ./rpi-wechat      # 微信文字通道
 /instances                 实例列表 + 当前微信接管
 /use <实例|编号>            把微信接管切过去（空参数显示持有者）
 /msg <实例> <内容>          发消息
-/cmd <实例> <指令>          远程执行指令（结果以通知形式回到本会话）
 /ask <实例> <任务>          委派任务（结果以通知形式回到本会话）
 /start [目录]               本机 tmux 启动新实例（缺省=当前实例目录；允许同目录多实例）
 /stop <实例|编号>           停止本机实例的 tmux（租约自动交还）
@@ -193,7 +191,7 @@ relay 有两种线上格式：
 
 ## TUI 参数建议
 
-`/msg` `/cmd` `/ask` `/use` 都注册了参数建议：在参数区打字时，补全弹窗会按输入的前缀收窄出
+`/msg` `/ask` `/use` 都注册了参数建议：在参数区打字时，补全弹窗会按输入的前缀收窄出
 实例名（`name@host`，标注 当前/微信/忙）。列表由插件全量提供（最多 32 项），收窄在宿主本地做，
 所以删掉几个字符就能找回候选，不依赖插件。需要宿主支持 `register_argument_suggester`
 （pi-rust PR #338）；旧宿主上这个功能静默关闭，其余不受影响。

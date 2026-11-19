@@ -62,7 +62,7 @@ kv(key PK, value)
 {"kind":"notice","text":"…"}
 ```
 
-`kind=text` 注入目标 agent；`cmd` 走 intent→runtime action；`reply` 完成 `hub_ask`/`hub_cmd`；
+`kind=text` 注入目标 agent；`cmd` 走 intent→runtime action；`reply` 完成 `hub_ask`；
 `notice` 只显示不进模型上下文。
 
 投递语义：入库即持久；接收方处理完再 `ack`；未 ack 且未过期会被再次读出（at-least-once），

@@ -10,18 +10,17 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use rpi_hub_core::now_ms;
-use rpi_hub_core::protocol::{CommandIntent, Envelope};
+use rpi_hub_core::protocol::Envelope;
 use rpi_plugin_sdk::{CommandHandlerFn, StbString, StbStringRef};
 
 use crate::host::{self, Hub};
-use crate::{intent, tools};
+use crate::tools;
 
 pub fn registry() -> Vec<(&'static str, &'static str, CommandHandlerFn)> {
     vec![
         ("instances", "列出所有 rpi 实例与微信接管者", cmd_instances),
         ("use", "把微信接管切换到实例：/use <实例|编号>", cmd_use),
         ("msg", "给实例发消息：/msg <实例> <内容>", cmd_msg),
-        ("cmd", "给实例发指令：/cmd <实例> <指令>", cmd_cmd),
         ("ask", "让实例调研并回结果：/ask <实例> <任务>", cmd_ask),
         ("hub", "hub 诊断：/hub status|who|name <名>|leave", cmd_hub),
         ("start", "本机启动新实例：/start [目录]（缺省=当前目录）", cmd_start),
@@ -306,61 +305,6 @@ extern "C" fn cmd_msg(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
                 .map_err(|e| e.to_string())?;
         hub.deliver(envelope)?;
         Ok(Reply::Text(format!("已发送给 {}", target.label())))
-    })();
-    finish(out, result)
-}
-
-extern "C" fn cmd_cmd(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
-    let args = args_of(raw);
-    let result = (|| -> Result<Reply, String> {
-        let hub = hub()?;
-        let mut flow = MsgFlow::parse(&args);
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&args) {
-            match value.get("action").and_then(|v| v.as_str()) {
-                Some("cancel") => return Ok(Reply::Text("已取消".to_string())),
-                Some("select") => {
-                    flow.target = value
-                        .get("value")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string);
-                }
-                _ => {}
-            }
-        }
-        let Some(target_query) = flow.target.clone() else {
-            let items = selector_items(&hub)?;
-            return Ok(selector_payload(&items));
-        };
-        let Some(command) = flow.text.clone().filter(|t| !t.trim().is_empty()) else {
-            return Ok(editor_payload(
-                format!(
-                    "发给 {target_query} 的指令（可用: status new fork switch <id> compact model <id> thinking <级别> name <名> stop reload help）"
-                ),
-                &flow.draft,
-            ));
-        };
-        let target = hub.resolve_target(&target_query)?;
-        let intent = CommandIntent::parse(&command).map_err(|e| e.to_string())?;
-        if target.node_id == hub.node_id {
-            // Same-name trap: the Tab completion value for THIS instance's
-            // row is identical to the label the user meant to pick on a
-            // sibling instance. Executing management intents (new/fork/…)
-            // locally would silently discard the caller's session context.
-            return Err(format!(
-                "目标是自己（{}）——/cmd 用于控制其他实例。管理命令请直接在 TUI 输入；若要选同名的其他实例，用编号或完整 name@host",
-                target.label()
-            ));
-        }
-        // 带 correlation：目标执行完会把结果作为 Reply 投回本实例，worker
-        // 收到后以通知形式展示（否则结果只会出现在目标自己的会话里）。
-        let correlation = rpi_hub_core::protocol::new_id();
-        let envelope = Envelope::command(&hub.node_id, &hub.name(), &target.node_id, intent, now_ms())
-            .with_correlation(&correlation);
-        hub.deliver(envelope)?;
-        Ok(Reply::Text(format!(
-            "已发送给 {}；结果会以通知形式返回",
-            target.label()
-        )))
     })();
     finish(out, result)
 }

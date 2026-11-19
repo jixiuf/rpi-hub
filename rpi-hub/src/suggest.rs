@@ -67,7 +67,7 @@ fn build_suggestions(request: &str) -> Option<serde_json::Value> {
     // target is typed. The host's narrowing is prefix-ranked, so these
     // composite rows win (rank 0) while the bare instance rows still match
     // by contains (rank 2) — both visible, the intent rows first.
-    let items = if matches!(command, "cmd" | "ask") {
+    let items = if command == "ask" {
         let mut items = cached_rows(&hub)?;
         let target_part = args.split_once(char::is_whitespace).map(|(t, _)| t);
         if let Some(target) = target_part.filter(|t| !t.trim().is_empty()) {
