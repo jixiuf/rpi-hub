@@ -158,14 +158,12 @@ pub struct ChannelConfig {
 /// `/start` placement. The default is automatic and needs no config: a
 /// WINDOW in the current tmux session when this rpi runs inside tmux
 /// ($TMUX set), a dedicated detached session otherwise. `none` disables
-/// the command. Old spellings (`tmux`, `currentSession`, `current`) map
-/// to the default.
+/// the command.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SpawnMode {
     /// Automatic placement (window in current session when inside tmux).
     #[default]
-    #[serde(alias = "tmux", alias = "currentSession", alias = "current")]
     Auto,
     /// `/start` disabled on this machine.
     None,
@@ -377,17 +375,13 @@ mod tests {
     }
 
     #[test]
-    fn spawn_mode_legacy_spellings_map_to_auto() {
-        // The README/config docs historically used "current"; the camelCase
-        // rename made that unparseable. Both spellings must load.
-        for spelling in ["current", "currentSession"] {
-            let text = format!(
-                r#"{{"instanceSpawn": {{"mode": "{}"}}}}"#,
-                spelling
-            );
-            let config: HubConfig = serde_json::from_str(&text).unwrap();
-            assert_eq!(config.instance_spawn.mode, SpawnMode::Auto);
-        }
+    fn spawn_mode_parses_the_single_spelling() {
+        let config: HubConfig =
+            serde_json::from_str(r#"{"instanceSpawn": {"mode": "auto"}}"#).unwrap();
+        assert_eq!(config.instance_spawn.mode, SpawnMode::Auto);
+        // An unknown old spelling does not load — and the loader's broken-file
+        // path then falls back to defaults, which is the correct behavior.
+        assert!(serde_json::from_str::<HubConfig>(r#"{"instanceSpawn": {"mode": "current"}}"#).is_err());
     }
 
     #[test]
