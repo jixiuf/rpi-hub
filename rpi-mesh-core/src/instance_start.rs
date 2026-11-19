@@ -1,14 +1,18 @@
 //! `/start` and `/stop`: launch and stop rpi instances on the LOCAL machine.
 //!
-//! Shared by the hub plugin (TUI commands) and the wechat plugin (phone
-//! commands) — both talk to the same `HubStore`, which is why this lives in
-//! core rather than either plugin.
+//! Shared by the TUI commands and the phone commands — both talk to the same
+//! store, which is why this lives in core rather than either plugin.
 //!
 //! Design:
 //! - cwd omitted ⇒ the calling instance's cwd;
-//! - MULTIPLE instances per cwd allowed (tmux session auto-increments; rpi
-//!   appends `-<pid>` to colliding instance names);
-//! - mode from `InstanceSpawnConfig` (`tmux` default, `none` disables);
+//! - MULTIPLE instances per cwd allowed (session/window names auto-increment;
+//!   rpi appends `-<pid>` to colliding instance names);
+//! - the multiplexer (tmux, later screen) is behind [`InstanceSpawner`]:
+//!   `/start` asks it for a placement (a WINDOW in the current session when
+//!   the host runs inside it, a detached session otherwise); `none` disables;
+//! - **`/stop` never touches the multiplexer**: the presence row's pid is
+//!   authoritative — SIGTERM the process, the plugin lifecycle releases the
+//!   lease, and the pane closes itself when its leading process exits;
 //! - success confirmed by polling the store for a new presence row;
 //! - cwd/session-name cross a shell line: same whitelist as remote.rs.
 
@@ -36,10 +40,102 @@ fn is_safe_cwd(value: &str) -> bool {
         })
 }
 
-/// Base name for the tmux session: the cwd's last component, stripped to
-/// tmux-safe characters. `/tmp/` → `tmp`; a path with no usable component →
+/// The multiplexer behind `/start`. One implementation per multiplexer; the
+/// placement decision (window in current session vs detached session) is its
+/// business, because "current session" means something different in each.
+pub trait InstanceSpawner {
+    /// Whether this multiplexer is usable on this machine.
+    fn available(&self) -> bool;
+    /// Spawn `argv` in `cwd` as a WINDOW of the caller's current session
+    /// (only called when the host process runs inside the multiplexer).
+    fn spawn_window_in_current(
+        &self,
+        name: &str,
+        cwd: &Path,
+        argv: &[String],
+    ) -> Result<(), String>;
+    /// Spawn `argv` in `cwd` as a detached session named `name`.
+    fn spawn_detached(&self, name: &str, cwd: &Path, argv: &[String]) -> Result<(), String>;
+    /// Whether the host process currently runs inside this multiplexer.
+    fn host_is_inside(&self) -> bool;
+    /// True if a session with this name already exists (name dedup).
+    fn session_exists(&self, name: &str) -> bool;
+}
+
+/// tmux implementation.
+pub struct TmuxSpawner {
+    /// The tmux binary path (config: self-compiled or non-PATH installs).
+    pub binary: String,
+}
+
+impl InstanceSpawner for TmuxSpawner {
+    fn available(&self) -> bool {
+        Command::new(&self.binary)
+            .arg("-V")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
+    fn spawn_window_in_current(
+        &self,
+        name: &str,
+        cwd: &Path,
+        argv: &[String],
+    ) -> Result<(), String> {
+        // No `-t <session>`: tmux inherits the caller's current session from
+        // $TMUX AND picks the next free window index itself — an explicit
+        // `-t <session>` targets the base index and fails with
+        // "index N in use" on sessions whose indexes are not dense.
+        let status = Command::new(&self.binary)
+            .args(["new-window", "-d", "-n", name, "-c", &cwd.to_string_lossy()])
+            .args(argv)
+            .status()
+            .map_err(|error| format!("cannot run {}: {error}", self.binary))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("{} new-window exited with {status}", self.binary))
+        }
+    }
+
+    fn spawn_detached(&self, name: &str, cwd: &Path, argv: &[String]) -> Result<(), String> {
+        let status = Command::new(&self.binary)
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                name,
+                "-c",
+                &cwd.to_string_lossy(),
+            ])
+            .args(argv)
+            .status()
+            .map_err(|error| format!("cannot run {}: {error}", self.binary))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("{} new-session exited with {status}", self.binary))
+        }
+    }
+
+    fn host_is_inside(&self) -> bool {
+        std::env::var_os("TMUX").is_some_and(|v| !v.is_empty())
+    }
+
+    fn session_exists(&self, name: &str) -> bool {
+        Command::new(&self.binary)
+            .args(["has-session", "-t", name])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+}
+
+/// Base name for a session/window: the cwd's last component, stripped to
+/// multiplexer-safe characters. `/tmp/` → `tmp`; no usable component →
 /// `instance`.
-fn session_base(cwd: &Path) -> String {
+fn base_name(cwd: &Path) -> String {
     let name = cwd
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -56,101 +152,19 @@ fn session_base(cwd: &Path) -> String {
     }
 }
 
-fn session_exists(tmux: &str, name: &str) -> bool {
-    Command::new(tmux)
-        .args(["has-session", "-t", name])
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
-}
-
-/// First free tmux session name: `<prefix>-<base>`, `<prefix>-<base>-2`, …
-fn next_session_name(prefix: &str, tmux: &str, base: &str) -> String {
+/// First free session name: `<prefix>-<base>`, `<prefix>-<base>-2`, …
+fn next_session_name(spawner: &dyn InstanceSpawner, prefix: &str, base: &str) -> String {
     let candidate = format!("{prefix}-{base}");
-    if !session_exists(tmux, &candidate) {
+    if !spawner.session_exists(&candidate) {
         return candidate;
     }
     for n in 2..=99 {
         let candidate = format!("{prefix}-{base}-{n}");
-        if !session_exists(tmux, &candidate) {
+        if !spawner.session_exists(&candidate) {
             return candidate;
         }
     }
     format!("{prefix}-{base}-{}", std::process::id())
-}
-
-/// Where the new instance lands.
-enum Placement {
-    /// A new window inside the host process's existing tmux session.
-    Window(String),
-    /// A dedicated detached session.
-    Session(String),
-}
-
-/// The current tmux session name, from `$TMUX` (absent outside tmux).
-fn current_session(tmux: &str) -> Result<String, String> {
-    if std::env::var("TMUX").map(|v| v.is_empty()).unwrap_or(true) {
-        return Err("不在 tmux 中（$TMUX 缺失）".to_string());
-    }
-    let output = Command::new(tmux)
-        .args(["display-message", "-p", "-F", "#{session_name}"])
-        .output()
-        .map_err(|error| format!("cannot run {tmux}: {error}"))?;
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if name.is_empty() {
-        return Err("session name 为空".to_string());
-    }
-    Ok(name)
-}
-
-/// A new window in an EXISTING session. Window name = the basename (the
-/// running rpi does not rename windows, verified with allow-rename on).
-fn spawn_window(
-    tmux: &str,
-    command: &[String],
-    session: &str,
-    base: &str,
-    cwd: &Path,
-) -> Result<(), String> {
-    let status = Command::new(tmux)
-        .args([
-            "new-window",
-            "-d",
-            "-t",
-            session,
-            "-n",
-            base,
-            "-c",
-            &cwd.to_string_lossy(),
-        ])
-        .args(command)
-        .status()
-        .map_err(|error| format!("cannot run {tmux}: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{tmux} new-window exited with {status}"))
-    }
-}
-
-fn spawn_tmux(tmux: &str, command: &[String], session: &str, cwd: &Path) -> Result<(), String> {
-    let status = Command::new(tmux)
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            session,
-            "-c",
-            &cwd.to_string_lossy(),
-        ])
-        .args(command)
-        .status()
-        .map_err(|error| format!("cannot run {tmux}: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{tmux} new-session exited with {status}"))
-    }
 }
 
 /// What the spawn/stop functions need from the calling plugin. Both plugins
@@ -164,14 +178,6 @@ pub struct SpawnContext<'a> {
     /// The calling instance's cwd (the default for `/start`).
     pub cwd: String,
     pub spawn: &'a crate::config::InstanceSpawnConfig,
-}
-
-fn which_tmux(tmux: &str) -> bool {
-    Command::new(tmux)
-        .arg("-V")
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
 }
 
 /// Expand a leading `~` (we exec tmux directly; no shell).
@@ -206,46 +212,38 @@ pub fn start(ctx: &SpawnContext<'_>, cwd_arg: Option<&str>) -> Result<String, St
         }
         None => PathBuf::from(&ctx.cwd),
     };
-    let tmux = &ctx.spawn.tmux_command;
-    if !which_tmux(tmux) {
-        return Err(format!("tmux 不可用（{tmux} -V 失败）：/start 需要 tmux"));
+    let spawner: Box<dyn InstanceSpawner> = Box::new(TmuxSpawner {
+        binary: ctx.spawn.tmux_command.clone(),
+    });
+    if !spawner.available() {
+        return Err(format!(
+            "multiplexer {} 不可用（-V 失败）：/start 需要它",
+            ctx.spawn.tmux_command
+        ));
     }
 
     let argv = ctx.spawn.command.argv();
     if argv.is_empty() || argv[0].trim().is_empty() {
         return Err("instanceSpawn.command 不能为空".to_string());
     }
-    let base = session_base(&cwd);
+    let base = base_name(&cwd);
     let before = rows(ctx)?;
-    // Placement: a WINDOW in the current tmux session when this rpi runs
-    // inside tmux ($TMUX set), a dedicated detached session otherwise.
-    // That is the DEFAULT behavior — a fresh machine needs no config. The
-    // only config knob left is `none` (disable /start); `tmux` and
-    // `currentSession` are accepted legacy spellings of the same default.
-    let placement = if std::env::var_os("TMUX").is_some() {
-        current_session(tmux).map(Placement::Window)
+    // Placement lives in the spawner: a WINDOW in the current session when
+    // the host runs inside the multiplexer, a detached session otherwise.
+    let spawner_ref: &dyn InstanceSpawner = spawner.as_ref();
+    let placement_result = if spawner_ref.host_is_inside() {
+        spawner_ref.spawn_window_in_current(&base, &cwd, &argv)
     } else {
-        Ok(Placement::Session(next_session_name(
-            &ctx.spawn.session_prefix,
-            tmux,
-            &base,
-        )))
+        let name = next_session_name(spawner_ref, &ctx.spawn.session_prefix, &base);
+        spawner_ref.spawn_detached(&name, &cwd, &argv)
     };
-    let placement = placement.map_err(|e| format!("tmux 会话探测失败: {e}"))?;
-    match &placement {
-        Placement::Window(session) => spawn_window(tmux, &argv, session, &base, &cwd)?,
-        Placement::Session(session) => spawn_tmux(tmux, &argv, session, &cwd)?,
-    }
-    let placement_label = match &placement {
-        Placement::Window(session) => {
-            format!("窗口 {session}（session {session}）→ tmux attach -t {session}")
-        }
-        Placement::Session(session) => {
-            format!("tmux 会话 {session} → tmux attach -t {session}")
-        }
+    placement_result?;
+    // Confirm via the presence table: a new row whose cwd matches.
+    let placement_desc = if spawner_ref.host_is_inside() {
+        format!("窗口 {}（当前会话）", base)
+    } else {
+        format!("独立会话 {}-{}", ctx.spawn.session_prefix, base)
     };
-    let placement_desc = placement_label.clone();
-
     let deadline = Instant::now() + STARTUP_WAIT;
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(300));
@@ -280,39 +278,16 @@ pub fn stop(ctx: &SpawnContext<'_>, query: &str, now: i64) -> Result<String, Str
             target.host
         ));
     }
-    // Primary: find the instance's tmux pane BY PID (presence row pid —
-    // authoritative; window names are user-editable and not an ownership
-    // record). Fallback: the instance runs but owns no tmux pane (started
-    // outside tmux / detached from it) → SIGTERM the process directly.
-    let placement = tmux_target_for(&ctx.spawn.tmux_command, target.pid)?;
-    match placement {
-        Some((session, window, pane_id)) => {
-            // Always address the EXACT pane: "{session}:{window}.{pane_id}".
-            // A bare "{session}:" means "the session's CURRENT window" — the
-            // active one, which is usually the CALLER's own window (the
-            // self-kill bug). With the pane id the kill cannot hit anything
-            // but the pane that hosts the target pid.
-            let target_spec = format!("{session}:{window}.{pane_id}");
-            let status = Command::new(&ctx.spawn.tmux_command)
-                .args(["kill-pane", "-t", &target_spec])
-                .status()
-                .map_err(|error| format!("cannot run {}: {error}", ctx.spawn.tmux_command))?;
-            if !status.success() {
-                return Err(format!("kill-pane {target_spec} 失败（不存在？）"));
-            }
-        }
-        None => {
-            // Process exists (list_instances_alive guaranteed it) but owns
-            // no tmux pane: SIGTERM so the plugin lifecycle releases the
-            // wechat lease and unregisters cleanly.
-            let status = Command::new("kill")
-                .args(["-TERM", &target.pid.to_string()])
-                .status()
-                .map_err(|error| format!("cannot run kill: {error}"))?;
-            if !status.success() {
-                return Err(format!("kill -TERM {} 失败", target.pid));
-            }
-        }
+    // No multiplexer involvement: the presence row's pid is authoritative.
+    // SIGTERM lets the plugin lifecycle release the wechat lease and
+    // unregister cleanly; the pane closes itself when its leading process
+    // exits (same in tmux and screen).
+    let status = Command::new("kill")
+        .args(["-TERM", &target.pid.to_string()])
+        .status()
+        .map_err(|error| format!("cannot run kill: {error}"))?;
+    if !status.success() {
+        return Err(format!("kill -TERM {} 失败", target.pid));
     }
     Ok(format!("✅ 已停止 {}", target.label()))
 }
@@ -320,69 +295,6 @@ pub fn stop(ctx: &SpawnContext<'_>, query: &str, now: i64) -> Result<String, Str
 /// Find the tmux session whose cwd matches the target (not a name guess).
 /// Where the target instance runs: `(session, window)` discovered by cwd via
 /// list-windows (covers BOTH placements — dedicated sessions and windows).
-/// Resolve the tmux kill target for an instance **by pid** — the presence
-/// row's authoritative pid, never window-name conventions:
-/// a pane whose leading process is the instance pid (plain `rpi` command),
-/// or whose leading process is that pid's parent (a `sh -c "rpi; …"` wrapper).
-/// Returns `(session, window)`; window `None` means kill the whole session
-/// (the dedicated-session placement where the pane IS the session).
-fn tmux_target_for(tmux: &str, pid: u32) -> Result<Option<(String, String, String)>, String> {
-    let output = Command::new(tmux)
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{window_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}",
-        ])
-        .output()
-        .map_err(|error| format!("cannot run {tmux}: {error}"))?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        let mut parts = line.splitn(5, '\t');
-        let (Some(session), Some(window), Some(window_index), Some(pane_index), Some(pane_pid)) = (
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-        ) else {
-            continue;
-        };
-        let Ok(pane_pid) = pane_pid.parse::<u32>() else {
-            continue;
-        };
-        let leads_to_target = pane_pid == pid
-            || pgrep_child(pane_pid).is_some_and(|children| children.iter().any(|c| *c == pid));
-        if !leads_to_target {
-            continue;
-        }
-        // Return the exact pane address. window_index (not the window NAME)
-        // anchors the target even if the user renames the window between the
-        // scan and the kill; pane_index pins the pane.
-        let _ = window;
-        return Ok(Some((
-            session.to_string(),
-            window_index.to_string(),
-            pane_index.to_string(),
-        )));
-    }
-    Ok(None)
-}
-
-/// Direct children of a pid (best effort; empty on any failure).
-fn pgrep_child(pid: u32) -> Option<Vec<u32>> {
-    let output = Command::new("pgrep")
-        .arg("-P")
-        .arg(pid.to_string())
-        .output()
-        .ok()?;
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|l| l.trim().parse().ok())
-            .collect(),
-    )
-}
 
 /// The window-name candidate for a target (basename of its cwd).
 
@@ -462,13 +374,10 @@ mod tests {
 
     #[test]
     fn session_base_sanitizes_and_falls_back() {
-        assert_eq!(
-            session_base(Path::new("/Users/me/repos/pi-rust")),
-            "pi-rust"
-        );
-        assert_eq!(session_base(Path::new("/tmp/")), "tmp");
-        assert_eq!(session_base(Path::new("/")), "instance");
-        assert_eq!(session_base(Path::new("/work/我的 项目")), "instance");
+        assert_eq!(base_name(Path::new("/Users/me/repos/pi-rust")), "pi-rust");
+        assert_eq!(base_name(Path::new("/tmp/")), "tmp");
+        assert_eq!(base_name(Path::new("/")), "instance");
+        assert_eq!(base_name(Path::new("/work/我的 项目")), "instance");
     }
 
     #[test]
