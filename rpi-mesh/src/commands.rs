@@ -680,21 +680,40 @@ extern "C" fn cmd_reloadall(raw: StbStringRef, out: *mut StbString, _ud: *mut c_
             let _ = mesh.action(RuntimeActionId::Reload, serde_json::json!({}));
             return Ok(Reply::Text("只有本实例在网，已重新加载".to_string()));
         }
-        // 逐个发 reload intent（fire-and-forget：reload 后目标插件重启，
-        // reply 可能来不及回——不等）。
-        let mut sent = 0usize;
+        // 逐个实例发送 reload 并等待确认（reload intent 先回 "reloading…"
+        // 再执行——reply 在 reload 之前发出，不会丢）。报告每个实例的结果。
+        let mut results = Vec::new();
         for instance in &others {
             let intent = rpi_mesh_core::protocol::CommandIntent::parse("reload")
                 .map_err(|e| e.to_string())?;
+            let correlation = rpi_mesh_core::protocol::new_id();
             let envelope = rpi_mesh_core::protocol::Envelope::command(
                 &mesh.node_id,
                 &mesh.name(),
                 &instance.node_id,
                 intent,
                 now_ms(),
-            );
+            )
+            .with_correlation(&correlation);
+            mesh.expect_reply(&correlation);
             if mesh.store.send_envelope(&envelope).unwrap_or(false) {
-                sent += 1;
+                // 等确认（最长 5s：收到即视为已开始重载）。
+                let deadline = now_ms() + 5_000;
+                let mut outcome = "未响应（可能已离线）".to_string();
+                while now_ms() < deadline {
+                    if let Some(reply) = mesh.take_reply(&correlation) {
+                        outcome = if reply.ok {
+                            "已开始重载".to_string()
+                        } else {
+                            format!("重载失败: {}", reply.text)
+                        };
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                results.push(format!("{}: {}", instance.label(), outcome));
+            } else {
+                results.push(format!("{}: 信封投递失败", instance.label()));
             }
         }
         // 自己最后 reload（让其它实例先完成，微信租约自然流转）。
@@ -702,13 +721,13 @@ extern "C" fn cmd_reloadall(raw: StbStringRef, out: *mut StbString, _ud: *mut c_
         std::thread::Builder::new()
             .name("rpi-mesh-reloadall".into())
             .spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(1500));
+                std::thread::sleep(std::time::Duration::from_millis(500));
                 let _ = mesh2.action(RuntimeActionId::Reload, serde_json::json!({}));
             })
             .ok();
         Ok(Reply::Text(format!(
-            "已通知 {sent}/{others_total} 个实例重新加载；本实例稍后自动重载\n（微信接管在所有实例重载完成后自然回归某个实例，短暂切换属正常）",
-            others_total = others.len()
+            "reloadall 结果：\n{}\n本实例稍后自动重载（微信接管会自然流转到某个实例）",
+            results.join("\n")
         )))
     })();
     finish(out, result)
