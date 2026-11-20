@@ -18,6 +18,7 @@ use rpi_plugin_sdk::{
     PluginApi, StableToolSchema, StepHandle, StepResult, StbString, ToolPartialCb,
 };
 
+use crate::commands::{forward_start, forward_stop, spawn_ctx_from};
 use crate::mesh::{self, Mesh, ALIVE_MS};
 
 const DEFAULT_ASK_TIMEOUT_S: u64 = 300;
@@ -230,6 +231,24 @@ fn definitions() -> Vec<ToolDef> {
             cancel: sync_cancel,
             destroy: sync_destroy,
         },
+        ToolDef {
+            name: "mesh_start",
+            description: "Start a new rpi instance. Without 'executor' it starts on THIS machine in tmux; with 'executor' (any running instance) the start runs on THAT instance's machine instead.",
+            parameters: r#"{"type":"object","properties":{"dir":{"type":"string","description":"Working directory for the new instance (default: executor's cwd)"},"executor":{"type":"string","description":"Instance that performs the start; its machine hosts the new instance"}},"additionalProperties":false}"#,
+            execute: start_execute,
+            poll: sync_poll,
+            cancel: sync_cancel,
+            destroy: sync_destroy,
+        },
+        ToolDef {
+            name: "mesh_stop",
+            description: "Stop a running rpi instance. Without 'executor' the target must be on THIS machine; with 'executor' the stop runs on THAT instance's machine (for remote targets).",
+            parameters: r#"{"type":"object","properties":{"target":{"type":"string","description":"Instance to stop (name or /instances row number)"},"executor":{"type":"string","description":"Instance that performs the stop; its machine must host the target"}},"required":["target"],"additionalProperties":false}"#,
+            execute: stop_execute,
+            poll: sync_poll,
+            cancel: sync_cancel,
+            destroy: sync_destroy,
+        },
     ]
 }
 
@@ -327,6 +346,20 @@ rpi_plugin_sdk::execute_handler! {
     }
 }
 
+rpi_plugin_sdk::execute_handler! {
+    fn start_execute(_call_id, params) {
+        let outcome = run_start(&params.to_string_lossy());
+        SYNC.insert(SyncDrive { outcome: Some(outcome) })
+    }
+}
+
+rpi_plugin_sdk::execute_handler! {
+    fn stop_execute(_call_id, params) {
+        let outcome = run_stop(&params.to_string_lossy());
+        SYNC.insert(SyncDrive { outcome: Some(outcome) })
+    }
+}
+
 fn run_switch(params: &str) -> Result<String, String> {
     let mesh = require_mesh()?;
     let params = parse_params(params);
@@ -343,6 +376,42 @@ fn run_switch(params: &str) -> Result<String, String> {
     );
     let generation = admin.assign_to(capability, &target, now_ms())?;
     Ok(describe_transfer(capability, &target.label(), generation))
+}
+
+fn run_start(params: &str) -> Result<String, String> {
+    let mesh = require_mesh()?;
+    let params = parse_params(params);
+    let dir = params.get("dir").and_then(|v| v.as_str()).map(str::trim);
+    match params.get("executor").and_then(|v| v.as_str()).map(str::trim) {
+        Some(executor_query) if !executor_query.is_empty() => {
+            // Cross-machine: forward to the executor instance.
+            let executor = mesh.resolve_target(executor_query)?;
+            let cwd = dir.unwrap_or("").to_string();
+            crate::commands::forward_start(&mesh, &executor, &cwd)
+        }
+        _ => {
+            let spawn_ctx = spawn_ctx_from(&mesh);
+            rpi_mesh_core::instance_start::start(&spawn_ctx, dir)
+        }
+    }
+}
+
+fn run_stop(params: &str) -> Result<String, String> {
+    let mesh = require_mesh()?;
+    let params = parse_params(params);
+    let target_query = param_str(&params, "target")?;
+    match params.get("executor").and_then(|v| v.as_str()).map(str::trim) {
+        Some(executor_query) if !executor_query.is_empty() => {
+            // Cross-machine: resolve the target HERE, forward its unique label.
+            let executor = mesh.resolve_target(executor_query)?;
+            let target = mesh.resolve_target(target_query)?;
+            crate::commands::forward_stop(&mesh, &executor, &target.label())
+        }
+        _ => {
+            let spawn_ctx = spawn_ctx_from(&mesh);
+            rpi_mesh_core::instance_start::stop(&spawn_ctx, target_query, rpi_mesh_core::now_ms())
+        }
+    }
 }
 
 fn describe_transfer(capability: &str, label: &str, generation: i64) -> String {

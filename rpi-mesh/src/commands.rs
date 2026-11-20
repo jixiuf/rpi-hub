@@ -258,13 +258,13 @@ extern "C" fn cmd_stop(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
 /// Forward a cross-machine /start: `spawn <cwd>` cmd envelope to the target
 /// instance; its worker executes the local /start and mails the result back
 /// via the reply envelope (sync wait, same as /ask).
-fn forward_start(mesh: &Arc<Mesh>, target: &InstanceView, cwd: &str) -> Result<String, String> {
+pub(crate) fn forward_start(mesh: &Arc<Mesh>, target: &InstanceView, cwd: &str) -> Result<String, String> {
     let args_text = format!("spawn {}", cwd);
     forward_intent(mesh, target, &args_text, &format!("/start on {}", target.label()))
 }
 
 /// Forward a cross-machine /stop: `terminate <query>` cmd envelope.
-fn forward_stop(mesh: &Arc<Mesh>, target: &InstanceView, target_query: &str) -> Result<String, String> {
+pub(crate) fn forward_stop(mesh: &Arc<Mesh>, target: &InstanceView, target_query: &str) -> Result<String, String> {
     let args_text = format!("terminate {target_query}");
     forward_intent(mesh, target, &args_text, &format!("/stop on {}", target.label()))
 }
