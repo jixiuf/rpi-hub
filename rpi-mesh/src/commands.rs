@@ -25,7 +25,11 @@ pub fn registry() -> Vec<(&'static str, &'static str, CommandHandlerFn)> {
         ("use", "把微信接管切换到实例：/use <实例|编号>", cmd_use),
         ("msg", "给实例发消息：/msg <实例> <内容>", cmd_msg),
         ("ask", "让实例调研并回结果：/ask <实例> <任务>", cmd_ask),
-        ("mesh", "mesh 管理：/mesh relay|client <ip:端口>|local|token|status|who", cmd_mesh),
+        (
+            "mesh",
+            "组网与管理：/mesh relay [端口]（本机作中继）/ client <ip:端口> [token]（连中继）/ local / status（模式与地址）/ token / who",
+            cmd_mesh,
+        ),
         ("start", "本机启动新实例：/start [目录]（缺省=当前目录）", cmd_start),
         ("stop", "停止本机实例：/stop <编号|名字>", cmd_stop),
     ]
