@@ -84,6 +84,7 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 /stop <实例>:<实例|编号>    跨机：在该实例所在机器上停止目标实例
 /cmd <实例> <指令>          跨机管理指令：status / model [id] / thinking <级别> /
                             name <文本> / stop / reload（会话类指令不支持跨机）
+/reloadall                  所有实例重新加载扩展（升级 dylib 后用）
 /mesh relay|client|local|token|status（跨机组网与管理）
 /wechat login|start|stop|status
 ```

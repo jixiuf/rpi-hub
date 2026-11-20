@@ -6,6 +6,7 @@
 //! transcript notice when the reply arrives.
 
 use std::ffi::c_void;
+use rpi_plugin_sdk::RuntimeActionId;
 use std::path::Path;
 use std::process::Command;
 
@@ -34,6 +35,7 @@ pub fn registry() -> Vec<(&'static str, &'static str, CommandHandlerFn)> {
         ("start", "启动新实例：/start [目录]（本机）/ /start <实例>:<目录>（跨机）", cmd_start),
         ("stop", "停止实例：/stop <实例|编号>（本机）/ /stop <执行实例>:<目标>（跨机）", cmd_stop),
         ("cmd", "在指定实例上执行管理指令：/cmd <实例> status|model <id>|stop|reload|…", cmd_cmd),
+        ("reloadall", "全网所有实例重新加载扩展（含本实例）", cmd_reloadall),
     ]
 }
 
@@ -633,6 +635,55 @@ extern "C" fn cmd_cmd(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
         }
         forward_intent(&mesh, &target, intent_text, &format!("/cmd {intent_text} on {}", target.label()))
             .map(Reply::Text)
+    })();
+    finish(out, result)
+}
+
+extern "C" fn cmd_reloadall(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
+    let _ = raw;
+    let result = (|| -> Result<Reply, String> {
+        let mesh = mesh()?;
+        let now = now_ms();
+        let instances = mesh.instances(now)?;
+        let others: Vec<&InstanceView> = instances
+            .iter()
+            .filter(|i| i.node_id != mesh.node_id)
+            .collect();
+        if others.is_empty() {
+            // 只有自己：直接 reload。
+            let _ = mesh.action(RuntimeActionId::Reload, serde_json::json!({}));
+            return Ok(Reply::Text("只有本实例在网，已重新加载".to_string()));
+        }
+        // 逐个发 reload intent（fire-and-forget：reload 后目标插件重启，
+        // reply 可能来不及回——不等）。
+        let mut sent = 0usize;
+        for instance in &others {
+            let intent = rpi_mesh_core::protocol::CommandIntent::parse("reload")
+                .map_err(|e| e.to_string())?;
+            let envelope = rpi_mesh_core::protocol::Envelope::command(
+                &mesh.node_id,
+                &mesh.name(),
+                &instance.node_id,
+                intent,
+                now_ms(),
+            );
+            if mesh.store.send_envelope(&envelope).unwrap_or(false) {
+                sent += 1;
+            }
+        }
+        // 自己最后 reload（让其它实例先完成，微信租约自然流转）。
+        let mesh2 = Arc::clone(&mesh);
+        std::thread::Builder::new()
+            .name("rpi-mesh-reloadall".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                let _ = mesh2.action(RuntimeActionId::Reload, serde_json::json!({}));
+            })
+            .ok();
+        Ok(Reply::Text(format!(
+            "已通知 {sent}/{others_total} 个实例重新加载；本实例稍后自动重载\n（微信接管在所有实例重载完成后自然回归某个实例，短暂切换属正常）",
+            others_total = others.len()
+        )))
     })();
     finish(out, result)
 }
