@@ -173,12 +173,18 @@ impl MeshStore for Store {
         Ok(Some(view))
     }
 
-    /// Channel state carried with a lease (cursor etc. move atomically with
-    /// ownership). None when there is no lease row or no state.
-    fn channel_state(&self, _capability: &str) -> Option<serde_json::Value> {
-        None
+    fn channel_state(&self, capability: &str) -> Option<serde_json::Value> {
+        Store::channel_state(self, capability)
     }
-    fn set_channel_state(&self, _capability: &str, _state: &serde_json::Value) {}
+    fn set_channel_state(&self, capability: &str, state: &serde_json::Value) {
+        Store::set_channel_state(self, capability, state)
+    }
+    fn lease_cursor(&self, capability: &str) -> Option<String> {
+        Store::lease_cursor(self, capability)
+    }
+    fn set_lease_cursor(&self, capability: &str, cursor: &str) {
+        Store::set_lease_cursor(self, capability, cursor)
+    }
     /// Drop presence rows of same-host pids that are demonstrably dead
     /// (`kill(pid, 0)` fails). Only the local Store reaps; the default (and
     /// the relay client's) is a no-op because a foreign machine's pids are
