@@ -11,6 +11,7 @@ use std::process::Command;
 
 use std::sync::Arc;
 
+use rpi_plugin_sdk::RuntimeActionId;
 use rpi_mesh_core::now_ms;
 use rpi_mesh_core::store::InstanceView;
 use rpi_mesh_core::protocol::Envelope;
@@ -305,6 +306,21 @@ fn forward_intent(
     }
 }
 
+/// Trigger a plugin reload shortly after the current command returns, so the
+/// new config applies WITHOUT a manual /reload. The delay lets the command's
+/// own output reach the TUI before the plugin unloads (the Reload action
+/// tears down this load — including the handler that is still running).
+fn deferred_reload(mesh: &Arc<Mesh>) {
+    let mesh = Arc::clone(mesh);
+    std::thread::Builder::new()
+        .name("rpi-mesh-reload".into())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let _ = mesh.action(RuntimeActionId::Reload, serde_json::json!({}));
+        })
+        .ok();
+}
+
 /// Best-effort outward-facing IPv4 (first address of `hostname -I`).
 fn local_ip() -> Option<String> {
     let output = Command::new("hostname").args(["-I"]).output().ok()?;
@@ -563,8 +579,9 @@ extern "C" fn cmd_mesh(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
                     .map_err(|e| format!("写入配置失败: {e}"))?;
                 let token = ensure_relay_token(mesh.dir())?;
                 let ip = local_ip().unwrap_or_else(|| mesh.host.clone());
+                deferred_reload(&mesh);
                 Ok(format!(
-                    "✅ 已转为 relay 模式（配置已保存，/reload 生效）\n监听: {listen}\n对外 IP: {ip}\n\n其它机器加入:\n  1. 把 relay-token 复制到那台机器的 ~/.rpi/agent/mesh/relay-token\n     token: {token}\n  2. 那台机器执行 /mesh client {ip}:{port}\n  3. 两端分别 /reload"
+                    "✅ 已转为 relay 模式（正在自动生效，约 1 秒）\n监听: {listen}\n对外 IP: {ip}\n\n其它机器加入:\n  1. 把 relay-token 复制到那台机器的 ~/.rpi/agent/mesh/relay-token\n     token: {token}\n  2. 那台机器执行 /mesh client {ip}:{port}\n  3. 那台机器 /reload"
                 ))
             }
             "client" => {
@@ -586,15 +603,16 @@ extern "C" fn cmd_mesh(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
                 let token_hint = match parts.get(1) {
                     Some(token) => {
                         write_relay_token(&token_path, token)?;
-                        format!("relay-token 已写入（来自你输入的 token）")
+                        "relay-token 已写入（来自你输入的 token）".to_string()
                     }
                     None if token_path.exists() => "relay-token 已就位".to_string(),
                     None => format!(
                         "⚠ 尚未设置 token：在 relay 机器上执行 /mesh token 获取，然后\n   /mesh token <token> 写入本机"
                     ),
                 };
+                deferred_reload(&mesh);
                 Ok(format!(
-                    "✅ 已转为 client 模式（连接 {endpoint}，配置已保存，/reload 生效）\n{token_hint}"
+                    "✅ 已转为 client 模式（连接 {endpoint}，正在自动生效，约 1 秒）\n{token_hint}"
                 ))
             }
             "local" => {
@@ -604,7 +622,8 @@ extern "C" fn cmd_mesh(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
                 config.remote.relay.connect = None;
                 rpi_mesh_core::config::write(mesh.dir(), &config)
                     .map_err(|e| format!("写入配置失败: {e}"))?;
-                Ok("✅ 已转为 local 单机模式（配置已保存，/reload 生效）".to_string())
+                deferred_reload(&mesh);
+                Ok("✅ 已转为 local 单机模式（正在自动生效，约 1 秒）".to_string())
             }
             "token" => {
                 // /mesh token — show; /mesh token <value> — set (clients).
