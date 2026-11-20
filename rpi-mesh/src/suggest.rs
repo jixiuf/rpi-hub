@@ -67,7 +67,23 @@ fn build_suggestions(request: &str) -> Option<serde_json::Value> {
     // target is typed. The host's narrowing is prefix-ranked, so these
     // composite rows win (rank 0) while the bare instance rows still match
     // by contains (rank 2) — both visible, the intent rows first.
-    let items = if command == "ask" {
+    let items = if command == "start" {
+        // /start 的参数：本机=目录（无法枚举）；跨机=执行实例。统一给出实例列表，
+        // 用户选一个就得到 "实例:" 前缀（跨机），手打目录则跳过补全。
+        cached_rows(&mesh)?
+            .into_iter()
+            .map(|mut row| {
+                // value 变成 "<实例>:" 前缀，选中后接着输目录
+                if let Some(v) = row.get("value").and_then(|v| v.as_str()) {
+                    row["value"] = serde_json::json!(format!("{v}:"));
+                    if let Some(label) = row.get("label").and_then(|l| l.as_str()) {
+                        row["label"] = serde_json::json!(format!("{label} — 跨机启动（选中后输目录）"));
+                    }
+                }
+                row
+            })
+            .collect()
+    } else if command == "ask" {
         let mut items = cached_rows(&mesh)?;
         let target_part = args.split_once(char::is_whitespace).map(|(t, _)| t);
         if let Some(target) = target_part.filter(|t| !t.trim().is_empty()) {
