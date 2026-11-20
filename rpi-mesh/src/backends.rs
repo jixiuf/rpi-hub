@@ -161,14 +161,24 @@ fn host_negotiator(
     else {
         return;
     };
+    // Open the local DB with retries — a transient failure here must NOT
+    // fall back to an in-memory store: that would silently swap the proxy to
+    // an empty database and the instance would vanish from every listing
+    // (observed as "没有登记的实例" after reload storms).
     let local_store = || -> Arc<Store> {
-        match Store::open(dir) {
-            Ok(store) => Arc::new(store),
-            Err(error) => {
-                log(&format!("host: cannot open local store: {error}"));
-                Arc::new(Store::open_in_memory().expect("in-memory store"))
+        for attempt in 0..10 {
+            match Store::open(dir) {
+                Ok(store) => return Arc::new(store),
+                Err(error) => {
+                    log(&format!(
+                        "host: local store open failed (attempt {attempt}): {error}"
+                    ));
+                    std::thread::sleep(Duration::from_millis(500));
+                }
             }
         }
+        log("host: local store open failed repeatedly — using in-memory store as LAST resort");
+        Arc::new(Store::open_in_memory().expect("in-memory store"))
     };
     // HOST state: serve until the listener returns.
     loop {
