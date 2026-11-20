@@ -93,6 +93,30 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 /help               命令列表
 ```
 
+## 交互式组网（免改配置）
+
+不需要手编 config.json，两条命令完成组网：
+
+**relay 机器**（有公网/可达 IP 的那台）：
+
+```
+/mesh relay            # 转为 relay 模式（默认端口 9527；/mesh relay 8085 指定端口）
+                       # 输出：本机对外 IP、端口、relay-token（供复制）
+/reload                # 生效，开始监听
+```
+
+**其它机器**（家里/办公室）：
+
+```
+/mesh client <relay的IP>:<端口>    # 转为 client 模式（持久化到 config）
+                                    # 提示 relay-token 是否就位；/mesh token 可查看
+                                    # 把 relay 的 relay-token 复制到本机同路径
+/reload                            # 生效，自动连接 relay
+```
+
+`/mesh status` 查看当前模式；`/mesh local` 回单机模式。角色持久化在 config.json，
+重启后自动恢复。两台机器不互通没关系——只要各自能连 relay 即可。
+
 ## 状态与配置
 
 ```

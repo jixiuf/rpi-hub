@@ -6,6 +6,8 @@
 //! transcript notice when the reply arrives.
 
 use std::ffi::c_void;
+use std::path::Path;
+use std::process::Command;
 
 use std::sync::Arc;
 
@@ -23,7 +25,7 @@ pub fn registry() -> Vec<(&'static str, &'static str, CommandHandlerFn)> {
         ("use", "把微信接管切换到实例：/use <实例|编号>", cmd_use),
         ("msg", "给实例发消息：/msg <实例> <内容>", cmd_msg),
         ("ask", "让实例调研并回结果：/ask <实例> <任务>", cmd_ask),
-        ("mesh", "mesh 诊断：/mesh status|who|name <名>|leave", cmd_mesh),
+        ("mesh", "mesh 管理：/mesh relay|client <ip:端口>|local|token|status|who", cmd_mesh),
         ("start", "本机启动新实例：/start [目录]（缺省=当前目录）", cmd_start),
         ("stop", "停止本机实例：/stop <编号|名字>", cmd_stop),
     ]
@@ -299,6 +301,45 @@ fn forward_intent(
     }
 }
 
+/// Best-effort outward-facing IPv4 (first address of `hostname -I`).
+fn local_ip() -> Option<String> {
+    let output = Command::new("hostname").args(["-I"]).output().ok()?;
+    let first = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()?
+        .to_string();
+    (!first.is_empty()).then_some(first)
+}
+
+/// Read the relay token, generating the file if absent (mirrors the relay
+/// listener's generate-on-first-use rule so /mesh relay can show it).
+fn ensure_relay_token(dir: &Path) -> Result<String, String> {
+    let path = dir.join("relay-token");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let token = text.trim().to_string();
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+    let token: String = {
+        let a = uuid::Uuid::new_v4().simple().to_string();
+        let b = uuid::Uuid::new_v4().simple().to_string();
+        format!("{}{}", &a[..16], &b[..16])
+    };
+    std::fs::write(&path, format!("{token}\n"))
+        .map_err(|e| format!("cannot write relay-token: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o600);
+            let _ = std::fs::set_permissions(&path, permissions);
+        }
+    }
+    Ok(token)
+}
+
 /// Assemble the core SpawnContext from the mesh Mesh. Also used by the
 /// `spawn`/`terminate` intents (cross-machine /start forward lands here).
 pub(crate) fn spawn_ctx_from(
@@ -481,8 +522,64 @@ extern "C" fn cmd_mesh(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
                 mesh.request_shutdown();
                 Ok("本实例已退出 mesh（/reload 或重启后重新加入）".to_string())
             }
+            "relay" => {
+                // /mesh relay [port] — become the relay host, persist, guide.
+                let port = rest.trim().parse::<u16>().unwrap_or(9527);
+                let listen = format!("0.0.0.0:{port}");
+                let mut config = mesh.config.clone();
+                config.remote.mode = rpi_mesh_core::config::RemoteMode::Relay;
+                config.remote.relay.listen = Some(listen.clone());
+                config.remote.relay.connect = None;
+                config.remote.relay.http = true;
+                rpi_mesh_core::config::write(mesh.dir(), &config)
+                    .map_err(|e| format!("写入配置失败: {e}"))?;
+                let token = ensure_relay_token(mesh.dir())?;
+                let ip = local_ip().unwrap_or_else(|| mesh.host.clone());
+                Ok(format!(
+                    "✅ 已转为 relay 模式（配置已保存，/reload 生效）\n监听: {listen}\n对外 IP: {ip}\n\n其它机器加入:\n  1. 把 relay-token 复制到那台机器的 ~/.rpi/agent/mesh/relay-token\n     token: {token}\n  2. 那台机器执行 /mesh client {ip}:{port}\n  3. 两端分别 /reload"
+                ))
+            }
+            "client" => {
+                // /mesh client <ip:port> — join a relay, persist, guide.
+                let endpoint = rest.trim().to_string();
+                if endpoint.is_empty() {
+                    return Err("用法: /mesh client <ip:端口>".into());
+                }
+                let mut config = mesh.config.clone();
+                config.remote.mode = rpi_mesh_core::config::RemoteMode::Client;
+                config.remote.relay.connect = Some(endpoint.clone());
+                config.remote.relay.listen = None;
+                config.remote.relay.http = true;
+                rpi_mesh_core::config::write(mesh.dir(), &config)
+                    .map_err(|e| format!("写入配置失败: {e}"))?;
+                let token_path = mesh.dir().join("relay-token");
+                let token_hint = if token_path.exists() {
+                    "relay-token 已就位".to_string()
+                } else {
+                    format!(
+                        "⚠ 尚无 relay-token：把 relay 机器的 ~/.rpi/agent/mesh/relay-token 复制到 {}（/mesh token 可查看）",
+                        token_path.display()
+                    )
+                };
+                Ok(format!(
+                    "✅ 已转为 client 模式（连接 {endpoint}，配置已保存，/reload 生效）\n{token_hint}"
+                ))
+            }
+            "local" => {
+                let mut config = mesh.config.clone();
+                config.remote.mode = rpi_mesh_core::config::RemoteMode::Local;
+                config.remote.relay.listen = None;
+                config.remote.relay.connect = None;
+                rpi_mesh_core::config::write(mesh.dir(), &config)
+                    .map_err(|e| format!("写入配置失败: {e}"))?;
+                Ok("✅ 已转为 local 单机模式（配置已保存，/reload 生效）".to_string())
+            }
+            "token" => {
+                let token = ensure_relay_token(mesh.dir())?;
+                Ok(format!("relay-token: {token}"))
+            }
             other => Err(format!(
-                "未知子命令 {other:?}；可用: status | who | name <名> | leave"
+                "未知子命令 {other:?}；可用: status | relay [端口] | client <ip:端口> | local | token | who | name <名> | leave"
             )),
         }
         .map(Reply::Text)
