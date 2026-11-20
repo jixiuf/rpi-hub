@@ -362,12 +362,59 @@ pub fn execute(mesh: &Arc<Channel>, command: WxCommand) -> Result<String, String
         WxCommand::Status => Ok(status_text(mesh, now)),
         WxCommand::Help => Ok(HELP.to_string()),
         WxCommand::Start(cwd) => {
+            // Cross-machine form: "<instance>:<dir>" — forward to that
+            // instance's machine (same as the TUI's /start forwarding).
+            if let Some(cwd) = cwd.as_ref().filter(|c| c.contains(':')) {
+                if let Some((executor_query, dir)) = cwd.split_once(':') {
+                    let executor_query = executor_query.trim();
+                    let dir = dir.trim();
+                    if !executor_query.is_empty() && !dir.is_empty() {
+                        let executor = mesh.mesh.resolve_target(executor_query)?;
+                        if executor.node_id != mesh.node_id() {
+                            return crate::commands::forward_start(
+                                &mesh.mesh,
+                                &executor,
+                                dir,
+                            );
+                        }
+                        // Executor is self: local start with the dir.
+                        let store_dyn = mesh.mesh.store_dyn();
+                        let spawn_ctx = start_ctx(mesh, Some(dir), &store_dyn);
+                        return rpi_mesh_core::instance_start::start(
+                            &spawn_ctx,
+                            Some(dir),
+                        );
+                    }
+                }
+            }
             let store_dyn = Arc::clone(&mesh.store()) as Arc<dyn MeshStore>;
             let spawn_ctx = start_ctx(mesh, cwd.as_deref(), &store_dyn);
             rpi_mesh_core::instance_start::start(&spawn_ctx, cwd.as_deref())
         }
         WxCommand::Stop(query) => {
-            let now = rpi_mesh_core::now_ms();
+            // Auto-routing (same as the TUI /stop): same machine → local
+            // stop; remote → forward to a live instance on that machine.            let now = rpi_mesh_core::now_ms();
+            let instances = mesh
+                .mesh
+                .store
+                .list_instances_alive(now, crate::mesh::ALIVE_MS)
+                .map_err(|e| e.to_string())?;
+            let target = crate::commands::resolve_target_by_list(
+                &instances,
+                &query,
+                &mesh.node_id(),
+            )
+            .map_err(|e| e.to_string())?;
+            if target.node_id == mesh.node_id() {
+                return Err("不能用 /stop 停掉当前实例（先 /use 切走再停）".to_string());
+            }
+            if target.host != mesh.mesh.host {
+                let executor = instances
+                    .iter()
+                    .find(|i| i.host == target.host && i.node_id != target.node_id)
+                    .unwrap_or(&target);
+                return crate::commands::forward_stop(&mesh.mesh, executor, &target.label());
+            }
             let store_dyn = Arc::clone(&mesh.store()) as Arc<dyn MeshStore>;
             let spawn_ctx = start_ctx(mesh, None, &store_dyn);
             rpi_mesh_core::instance_start::stop(&spawn_ctx, &query, now)

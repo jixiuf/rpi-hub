@@ -63,6 +63,8 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 | `mesh_send` | 把消息投进目标实例的 agent 输入队列 |
 | `mesh_ask` | 委派任务并等待目标实例的最终回答 |
 | `mesh_switch` | 把某个渠道（默认 `wechat`）的接管切到目标实例 |
+| `mesh_start` | 启动新实例（缺省本机 tmux；带 `executor` 则在其实例所在机器启动） |
+| `mesh_stop` | 停止实例（本机或远端自动路由） |
 | `send_image_to_wechat` / `send_file_to_wechat` | 微信媒体外发（iLink CDN 加密上传） |
 
 ## 斜杠命令
