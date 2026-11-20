@@ -23,6 +23,7 @@ pub mod render;
 pub mod paths;
 pub mod protocol;
 pub mod status;
+pub mod secret;
 pub mod store;
 pub mod wire;
 

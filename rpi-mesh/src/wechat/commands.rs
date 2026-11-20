@@ -80,6 +80,16 @@ pub fn bootstrap(mesh: &Arc<Channel>) {
     // verify the target BEFORE handing the channel over.
     mesh.mesh
         .set_channel_capability("wechat", serde_json::json!({ "userId": credentials.user_id }));
+    // Publish immediately: the 3s heartbeat would carry it eventually, but a
+    // /use that lands in the first seconds would see an empty capability map
+    // and (correctly) reject — wrong outcome when credentials DO exist.
+    {
+        let now = rpi_mesh_core::now_ms();
+        let _ = mesh
+            .mesh
+            .store
+            .register_instance(&mesh.mesh.record(now), crate::mesh::ALIVE_MS);
+    }
     match spawn_bridge_public(mesh, &credentials) {
         Ok(()) => crate::wechat::channel::log("bridge auto-started"),
         Err(error) => crate::wechat::channel::log(&format!(

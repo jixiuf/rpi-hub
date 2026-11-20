@@ -225,6 +225,8 @@ impl Store {
     /// contention instead of disabling the plugin on a startup race.
     pub fn open(dir: &Path) -> Result<Self> {
         paths::ensure_private_dir(dir)?;
+        // At-rest key: env or <dir>/secret.key (generated on first use).
+        crate::secret::init(dir).map_err(|e| MeshError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         let path = paths::db_path(dir);
         let mut last: Option<MeshError> = None;
         for attempt in 0..40u64 {
@@ -348,6 +350,35 @@ impl Store {
                     .contains("duplicate column name: channels");
                 if !duplicate {
                     return Err(error.into());
+                }
+            }
+        }
+        // v3 also switches state_json to encrypted-at-rest: re-encrypt any
+        // plaintext rows left by the previous layout (values that are valid
+        // base64 ciphertext stay untouched — GCM decryption would fail on
+        // '{' anyway, which is how plaintext is detected).
+        {
+            let rows: Vec<(String, String)> = {
+                let mut statement = conn
+                    .prepare("SELECT capability, state_json FROM leases WHERE state_json != ''")
+                    .unwrap();
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .unwrap();
+                rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+            };
+            for (capability, state_json) in rows {
+                // Plaintext JSON starts with '{'; ciphertext starts with base64.
+                // Encrypt anything that is not already our ciphertext format.
+                let looks_encrypted = crate::secret::decrypt(&state_json).is_ok();
+                if !looks_encrypted {
+                    let encrypted = crate::secret::encrypt(&state_json);
+                    let _ = conn.execute(
+                        "UPDATE leases SET state_json = ?2 WHERE capability = ?1",
+                        rusqlite::params![capability, encrypted],
+                    );
                 }
             }
         }
@@ -891,6 +922,8 @@ impl Store {
             .optional()
             .ok()
             .flatten()?;
+        // Empty = never set. Encrypted at rest (credentials are stored here).
+        let text = crate::secret::decrypt(&text).ok()?;
         serde_json::from_str(&text).ok()
     }
 
@@ -898,6 +931,8 @@ impl Store {
         let Ok(text) = serde_json::to_string(state) else {
             return;
         };
+        // Encrypted at rest: wechat credentials are stored here.
+        let text = crate::secret::encrypt(&text);
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
                 "UPDATE leases SET state_json = ?2 WHERE capability = ?1",
@@ -982,7 +1017,10 @@ impl Store {
     // ---------------------------------------------------------------- mailbox
 
     pub fn send_envelope(&self, envelope: &Envelope) -> Result<bool> {
-        let payload = serde_json::to_string(envelope)?;
+        // Sensitive payloads (message bodies, task texts) are encrypted at
+        // rest; routing columns (to_node/kind/correlation) stay plaintext so
+        // the relay can route without the key.
+        let payload = crate::secret::encrypt(&serde_json::to_string(envelope)?);
         let conn = self.conn.lock().expect("store mutex poisoned");
         let changed = conn.execute(
             r#"INSERT OR IGNORE INTO envelopes
@@ -1017,7 +1055,12 @@ impl Store {
         let mut out = Vec::new();
         for row in rows {
             let payload = row?;
-            match serde_json::from_str::<Envelope>(&payload) {
+            // Encrypted at rest (see send_envelope); a wrong key or tampered
+            // row decrypts to an error — skip it like a corrupt row.
+            let Ok(decrypted) = crate::secret::decrypt(&payload) else {
+                continue;
+            };
+            match serde_json::from_str::<Envelope>(&decrypted) {
                 Ok(envelope) => out.push(envelope),
                 // A corrupt row must not wedge the mailbox forever: skip it and
                 // let `purge` reap it by TTL.
