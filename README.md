@@ -65,6 +65,7 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 | `mesh_switch` | 把某个渠道（默认 `wechat`）的接管切到目标实例 |
 | `mesh_start` | 启动新实例（缺省本机；指定另一实例名则在它所在的机器上启动） |
 | `mesh_stop` | 停止实例（本机或远端自动路由） |
+| `mesh_cmd` | 在另一实例上执行管理指令（status/model/thinking/name/stop/reload） |
 | `send_image_to_wechat` / `send_file_to_wechat` | 微信媒体外发（iLink CDN 加密上传） |
 
 ## 斜杠命令
