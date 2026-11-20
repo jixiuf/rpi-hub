@@ -180,12 +180,6 @@ pub struct SpawnContext<'a> {
     pub spawn: &'a crate::config::InstanceSpawnConfig,
 }
 
-/// Is `pid` a process on THIS machine? (signal 0 probe; EPERM still means
-/// it exists locally). Cross-host pids simply fail the probe.
-fn pid_exists_locally(pid: u32) -> bool {
-    crate::store::pid_alive(pid)
-}
-
 /// Expand a leading `~` (we exec tmux directly; no shell).
 fn expand_home(arg: &str) -> String {
     if arg == "~" {
@@ -277,10 +271,11 @@ pub fn stop(ctx: &SpawnContext<'_>, query: &str, now: i64) -> Result<String, Str
     if target.node_id == ctx.node_id {
         return Err("不能用 /stop 停掉当前实例（先 /use 切走再停）".to_string());
     }
-    // Local vs remote decided by PID, not the host string: the same machine
-    // can report different hostnames (/etc/hostname vs hostname(1) vs env),
-    // and a string mismatch would wrongly refuse to stop a local instance.
-    if !pid_exists_locally(target.pid) {
+    // The host name is fixed per deployment (both ends agree on it), so the
+    // string comparison is authoritative. A pid probe would be wrong: pids
+    // get reused, and a remote instance's pid could coincide with a local
+    // process — killing it would be a mistake.
+    if target.host != ctx.host {
         return Err(format!(
             "{} 在远端机器 {}，/stop 只能停本机实例",
             target.label(),
