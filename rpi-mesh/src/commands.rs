@@ -562,7 +562,12 @@ extern "C" fn cmd_mesh(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
                     None => "local 单机".to_string(),
                 };
                 let token_path = mesh.dir().join("relay-token");
-                let token_state = if token_path.exists() { "已就位" } else { "未设置" };
+                let token_state = match std::fs::read_to_string(&token_path) {
+                    Ok(text) if !text.trim().is_empty() => {
+                        format!("已就位（{}…）", &text.trim()[..8])
+                    }
+                    _ => "未设置".to_string(),
+                };
                 Ok(format!(
                     "构建: {BUILD}\n实例: {}\n节点: {}\n模式: {remote_line}\ntoken: {token_state}\n实例数: {}\n待投递: {}/{} 条\n微信接管: {}",
                     mesh.label(),

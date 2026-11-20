@@ -551,6 +551,15 @@ fn handle_connection(stream: Stream, store: Arc<Store>, token: &Token) -> std::i
     if line.len() > MAX_FRAME_BYTES {
         return Ok(());
     }
+    // Protocol mismatch hint: an HTTP-mode client hitting a line-protocol
+    // relay sends "POST /mesh-rpc HTTP/1.1" as its first frame. Say so
+    // instead of a bare auth failure the user cannot diagnose.
+    if line.starts_with("POST ") || line.starts_with("GET ") {
+        log(&format!(
+            "protocol mismatch: an HTTP-mode client connected to a line-protocol relay (relay http=false?); connection dropped"
+        ));
+        return Ok(());
+    }
     let authorized = serde_json::from_str::<Request>(&line).ok().and_then(|request| {
         if request.method != AUTH_METHOD {
             return None;
@@ -649,6 +658,9 @@ fn handle_http_connection(
         } else if !token.matches(&request.auth.as_deref().unwrap_or("")) {
             status = "401 Unauthorized";
             body = b"authentication required".to_vec();
+            log(&format!(
+                "http: authentication failed — token missing or different on the client machine"
+            ));
         } else {
             let response = match serde_json::from_slice::<Request>(&request.body) {
                 Ok(request) => match dispatch(&store, &request.method, request.params) {
