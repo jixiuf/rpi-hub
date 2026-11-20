@@ -414,6 +414,18 @@ impl Mesh {
         if instances.is_empty() {
             return Err("no other rpi instance is running".into());
         }
+        // Number: the row number shown by /instances (same list order).
+        if let Ok(number) = query.parse::<usize>() {
+            if number == 0 {
+                return Err("编号从 1 开始（见 /instances）".into());
+            }
+            return instances.get(number - 1).cloned().ok_or_else(|| {
+                format!(
+                    "没有编号为 {number} 的实例；当前列表见 /instances（共 {} 行）",
+                    instances.len()
+                )
+            });
+        }
         let by_id: Vec<&InstanceView> = instances
             .iter()
             .filter(|i| i.node_id.starts_with(query))
