@@ -249,6 +249,15 @@ fn definitions() -> Vec<ToolDef> {
             cancel: sync_cancel,
             destroy: sync_destroy,
         },
+        ToolDef {
+            name: "mesh_cmd",
+            description: "Run an admin command on another instance: status, model <id>, thinking <level>, name <text>, stop (abort current run), reload. Session-manipulating commands (new/fork/switch) are not supported remotely.",
+            parameters: r#"{"type":"object","properties":{"target":{"type":"string","description":"Instance to run the command on (name or /instances row number)"},"command":{"type":"string","description":"Command with arguments, e.g. \"status\", \"model sonnet\", \"thinking high\", \"name my-session\""}},"required":["target","command"],"additionalProperties":false}"#,
+            execute: cmd_execute,
+            poll: sync_poll,
+            cancel: sync_cancel,
+            destroy: sync_destroy,
+        },
     ]
 }
 
@@ -413,6 +422,37 @@ fn run_stop(params: &str) -> Result<String, String> {
     }
     let spawn_ctx = spawn_ctx_from(&mesh);
     rpi_mesh_core::instance_start::stop(&spawn_ctx, target_query, rpi_mesh_core::now_ms())
+}
+
+rpi_plugin_sdk::execute_handler! {
+    fn cmd_execute(_call_id, params) {
+        let outcome = run_cmd(&params.to_string_lossy());
+        SYNC.insert(SyncDrive { outcome: Some(outcome) })
+    }
+}
+
+fn run_cmd(params: &str) -> Result<String, String> {
+    let mesh = require_mesh()?;
+    let params = parse_params(params);
+    let target_query = param_str(&params, "target")?;
+    let command = param_str(&params, "command")?;
+    let intent_name = command
+        .trim_start_matches('/')
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    if !crate::commands::REMOTE_SAFE_INTENTS.contains(&intent_name) {
+        return Err(format!(
+            "command {intent_name:?} cannot run remotely (session operations belong on the target's TUI)"
+        ));
+    }
+    let target = mesh.resolve_target(target_query)?;
+    if target.node_id == mesh.node_id {
+        let intent = rpi_mesh_core::protocol::CommandIntent::parse(command)
+            .map_err(|e| e.to_string())?;
+        return crate::intent::execute(&mesh, &intent);
+    }
+    crate::commands::forward_intent(&mesh, &target, command, &format!("/cmd on {}", target.label()))
 }
 
 fn describe_transfer(capability: &str, label: &str, generation: i64) -> String {

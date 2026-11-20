@@ -279,7 +279,7 @@ pub(crate) fn forward_stop(mesh: &Arc<Mesh>, target: &InstanceView, target_query
 }
 
 /// Send a `cmd` intent to `target` and wait synchronously for its reply.
-fn forward_intent(
+pub(crate) fn forward_intent(
     mesh: &Arc<Mesh>,
     target: &InstanceView,
     intent_args: &str,
@@ -600,7 +600,7 @@ extern "C" fn cmd_ask(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
 /// (new/fork/switch/goto/compact) are excluded: running them remotely swaps
 /// the target's session without its TUI knowing, so the transcript and the
 /// actual session diverge.
-const REMOTE_SAFE_INTENTS: &[&str] = &[
+pub(crate) const REMOTE_SAFE_INTENTS: &[&str] = &[
     "status", "model", "thinking", "name", "stop", "reload", "spawn", "terminate",
 ];
 
