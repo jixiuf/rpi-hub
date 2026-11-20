@@ -32,7 +32,8 @@ pub fn registry() -> Vec<(&'static str, &'static str, CommandHandlerFn)> {
             cmd_mesh,
         ),
         ("start", "启动新实例：/start [目录]（本机）/ /start <实例>:<目录>（跨机）", cmd_start),
-        ("stop", "停止实例：/stop <编号|名字>（本机）/ /stop <执行实例>:<目标>（跨机）", cmd_stop),
+        ("stop", "停止实例：/stop <实例|编号>（本机）/ /stop <执行实例>:<目标>（跨机）", cmd_stop),
+        ("cmd", "在指定实例上执行管理指令：/cmd <实例> status|model <id>|stop|reload|…", cmd_cmd),
     ]
 }
 
@@ -591,6 +592,47 @@ extern "C" fn cmd_ask(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
             "任务已交给 {}；结果会以通知形式返回",
             target.label()
         )))
+    })();
+    finish(out, result)
+}
+
+/// Intents safe to execute on a REMOTE instance. Session-manipulating ones
+/// (new/fork/switch/goto/compact) are excluded: running them remotely swaps
+/// the target's session without its TUI knowing, so the transcript and the
+/// actual session diverge.
+const REMOTE_SAFE_INTENTS: &[&str] = &[
+    "status", "model", "thinking", "name", "stop", "reload", "spawn", "terminate",
+];
+
+extern "C" fn cmd_cmd(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
+    let args = args_of(raw);
+    let result = (|| -> Result<Reply, String> {
+        let mesh = mesh()?;
+        let (target_query, rest) = split_target(&args);
+        if target_query.is_empty() || rest.trim().is_empty() {
+            return Ok(Reply::Text(
+                "用法: /cmd <实例> <指令> [参数]\n指令: status | model <id> | thinking <level> | name <文本> | stop | reload\n（new/fork/switch 等会话类指令请在目标实例的 TUI 上执行）".to_string(),
+            ));
+        }
+        let intent_text = rest.trim();
+        let intent_name = intent_text
+            .trim_start_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        if !REMOTE_SAFE_INTENTS.contains(&intent_name) {
+            return Err(format!(
+                "指令 {intent_name:?} 不能跨机执行（会话类操作请在目标实例的 TUI 上进行）"
+            ));
+        }
+        let target = mesh.resolve_target(target_query)?;
+        if target.node_id == mesh.node_id {
+            let intent = rpi_mesh_core::protocol::CommandIntent::parse(intent_text)
+                .map_err(|e| e.to_string())?;
+            return Ok(Reply::Text(crate::intent::execute(&mesh, &intent)?));
+        }
+        forward_intent(&mesh, &target, intent_text, &format!("/cmd {intent_text} on {}", target.label()))
+            .map(Reply::Text)
     })();
     finish(out, result)
 }
