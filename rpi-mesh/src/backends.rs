@@ -61,18 +61,51 @@ impl Backends {
                 let http = relay.http;
                 let store_for_thread = Arc::clone(&store);
                 let stop_for_thread = Arc::clone(&stop);
+                // Listen-right drift: ANY mesh instance on this machine can
+                // end up serving the relay. If the port is taken (another
+                // instance grabbed it), retry every 5s instead of giving up —
+                // when the current listener exits, the next instance takes
+                // over automatically and the mesh survives its death.
                 let join = std::thread::Builder::new()
                     .name("rpi-mesh-relay".into())
                     .spawn(move || {
-                        log(&format!("relay serving {endpoint_for_thread:?}"));
-                        if let Err(error) = serve(
-                            &endpoint_for_thread,
-                            store_for_thread,
-                            stop_for_thread,
-                            http,
-                            token,
-                        ) {
-                            log(&format!("relay stopped: {error}"));
+                        loop {
+                            if stop_for_thread.load(std::sync::atomic::Ordering::Acquire) {
+                                break;
+                            }
+                            log(&format!("relay serving {endpoint_for_thread:?}"));
+                            match serve(
+                                &endpoint_for_thread,
+                                Arc::clone(&store_for_thread),
+                                Arc::clone(&stop_for_thread),
+                                http,
+                                token.clone(),
+                            ) {
+                                Ok(()) => break, // clean shutdown
+                                Err(error) => {
+                                    let busy = error.to_string().contains("already listening")
+                                        || error.to_string().contains("Address already in use");
+                                    if busy {
+                                        log(&format!(
+                                            "relay port busy — retrying in 5s (the mesh survives if the current listener dies)"
+                                        ));
+                                        // Interruptible wait on the stop flag.
+                                        let deadline = std::time::Instant::now()
+                                            + std::time::Duration::from_secs(5);
+                                        while std::time::Instant::now() < deadline {
+                                            if stop_for_thread
+                                                .load(std::sync::atomic::Ordering::Acquire)
+                                            {
+                                                break;
+                                            }
+                                            std::thread::sleep(std::time::Duration::from_millis(200));
+                                        }
+                                        continue;
+                                    }
+                                    log(&format!("relay stopped: {error}"));
+                                    break;
+                                }
+                            }
                         }
                     })
                     .map_err(|e| e.to_string())?;
