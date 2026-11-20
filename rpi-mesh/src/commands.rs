@@ -232,7 +232,11 @@ extern "C" fn cmd_stop(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
             if !executor_query.is_empty() && !target_query.is_empty() {
                 let executor = mesh.resolve_target(executor_query)?;
                 if executor.node_id != mesh.node_id {
-                    return forward_stop(&mesh, &executor, target_query);
+                    // Resolve the target HERE (this machine's list order);
+                    // forward its unique label — row numbers would mean a
+                    // different row on the executor's own list.
+                    let target = mesh.resolve_target(target_query)?;
+                    return forward_stop(&mesh, &executor, &target.label());
                 }
                 let spawn_ctx = spawn_ctx_from(&mesh);
                 return rpi_mesh_core::instance_start::stop(
