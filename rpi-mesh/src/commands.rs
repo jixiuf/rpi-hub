@@ -251,16 +251,14 @@ extern "C" fn cmd_stop(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
         let instances = mesh.instances(now_ms())?;
         let target = resolve_target_by_list(&instances, query, mesh.node_id.as_str())?;
         if target.host != mesh.host {
+            // Prefer another live instance on the target's machine as the
+            // executor; if the target is the only instance there, send the
+            // terminate intent to the target itself (a self-shutdown, which
+            // stop_with_options allows for this path).
             let executor = instances
                 .iter()
                 .find(|i| i.host == target.host && i.node_id != target.node_id)
-                .ok_or_else(|| {
-                    format!(
-                        "{} 所在机器（{}）没有其它存活实例可以执行停止——直接登录那台机器操作",
-                        target.label(),
-                        target.host
-                    )
-                })?;
+                .unwrap_or(&target);
             return forward_stop(&mesh, executor, &target.label());
         }
         let spawn_ctx = spawn_ctx_from(&mesh);

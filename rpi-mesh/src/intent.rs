@@ -121,10 +121,18 @@ pub fn execute(mesh: &Mesh, intent: &CommandIntent) -> Result<String, String> {
             rpi_mesh_core::instance_start::start(&spawn_ctx, (!cwd.is_empty()).then_some(cwd))
         }
         // Remote /stop on THIS machine: terminate the named local instance.
+        // allow_self: the request may target this very instance (a remote
+        // operator stopping the last instance on this machine) — that is a
+        // normal, user-requested shutdown.
         "terminate" => {
             let query = intent.arg(0).ok_or("用法: terminate <实例|编号>")?;
             let spawn_ctx = crate::commands::spawn_ctx_from(mesh);
-            rpi_mesh_core::instance_start::stop(&spawn_ctx, query, rpi_mesh_core::now_ms())
+            rpi_mesh_core::instance_start::stop_with_options(
+                &spawn_ctx,
+                query,
+                rpi_mesh_core::now_ms(),
+                true,
+            )
         }
         other => Err(format!("未知指令 {other:?}（可用 help 查看）")),
     }

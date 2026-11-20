@@ -263,12 +263,24 @@ pub fn start(ctx: &SpawnContext<'_>, cwd_arg: Option<&str>) -> Result<String, St
 /// `/stop <编号|名字>`: kill the target's tmux session (the plugin lifecycle
 /// releases the wechat lease and unregisters presence on exit).
 pub fn stop(ctx: &SpawnContext<'_>, query: &str, now: i64) -> Result<String, String> {
+    stop_with_options(ctx, query, now, false)
+}
+
+/// `allow_self` permits stopping the calling instance itself — used by the
+/// cross-machine terminate intent (a remote executor asking this instance
+/// to shut down is a normal, user-requested stop).
+pub fn stop_with_options(
+    ctx: &SpawnContext<'_>,
+    query: &str,
+    now: i64,
+    allow_self: bool,
+) -> Result<String, String> {
     let instances = ctx
         .store
         .list_instances_alive(now, 30_000)
         .map_err(|e| e.to_string())?;
     let target = resolve_by_list(&instances, query)?;
-    if target.node_id == ctx.node_id {
+    if target.node_id == ctx.node_id && !allow_self {
         return Err("不能用 /stop 停掉当前实例（先 /use 切走再停）".to_string());
     }
     // The host name is fixed per deployment (both ends agree on it), so the
