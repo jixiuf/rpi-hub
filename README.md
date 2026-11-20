@@ -93,27 +93,28 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 /help               命令列表
 ```
 
-## 交互式组网（免改配置）
+## 交互式组网（免改配置，立即生效）
 
-不需要手编 config.json，两条命令完成组网：
+不需要手编 config.json，两条命令完成组网——**切换立即生效**（无需 /reload）：
 
 **relay 机器**（有公网/可达 IP 的那台）：
 
 ```
-/mesh relay            # 转为 relay 模式（默认端口 9527；/mesh relay 8085 指定端口）
-                       # 输出：本机对外 IP、端口、relay-token（供复制）
-/reload                # 生效，开始监听
+/mesh relay            # 本机成为 host：开始监听（默认端口 9527；/mesh relay 8085 指定）
+                       # 输出：本机对外 IP、端口、token（供复制）
 ```
 
 **其它机器**（家里/办公室）：
 
 ```
 /mesh client <relay的IP>:<端口> <token>   # token 就是从 relay 输出里复制的那个
-/reload                                   # 生效，自动连接 relay
 ```
 
-token 也可以事后单独设置：`/mesh token <token>`。`/mesh status` 显示当前模式、
-监听/连接地址与 token 状态。
+`/mesh status` 显示当前角色（host/guest/local）、监听/连接地址、token 指纹（前 8 位，
+两端比对用）。`/mesh local` 回单机。角色持久化，重启自动恢复。
+
+**relay 机器建议跑一个专职常驻实例**（tmux while 保活）——监听权在该机实例间自动漂移，
+专职实例保证 relay 不随 TUI 退出而消失。
 
 `/mesh status` 查看当前模式；`/mesh local` 回单机模式。角色持久化在 config.json，
 重启后自动恢复。两台机器不互通没关系——只要各自能连 relay 即可。
@@ -127,14 +128,30 @@ token 也可以事后单独设置：`/mesh token <token>`。`/mesh status` 显�
 ├── relay-token
 ├── logs/mesh.log logs/wechat.log
 └── wechat/              # 微信凭据（0600）与媒体暂存
+└── secret.key           # 静态加密密钥（0600）——见下「敏感数据加密」
 ```
+
+### 敏感数据加密
+
+mesh.db 里的两类敏感数据在落盘前用 **AES-256-GCM** 加密：微信 bot token 与全部
+信封正文（/msg /ask 的内容）。路由列（to_node/kind）保持明文，relay 无需解密即可转发。
+
+密钥在 DB 之外：`RPI_MESH_SECRET` env（64 位 hex）优先，否则 `<mesh 目录>/secret.key`
+（首次自动生成，0600）。**共享同一 mesh.db（或同一 relay）的所有机器必须持有同一把
+密钥**——onboarding 时复制一次 `secret.key`。丢失它：凭据需重新扫码，信封为瞬态数据。
+
+### 微信凭据自动同步
+
+登录过微信的实例把凭据发布到 mesh.db（加密存储）；其它实例启动时自动拉取落盘，
+**无需在该机重新扫码**。`/use` 交接前会校验目标实例是否有凭据（presence 的 channels
+能力表），没有则拒绝——杜绝「租约在、消息没人拉」的假活状态。
 
 ```json
 {
   "version": 1,
   "instanceName": null,
   "lease": { "ttlSeconds": 60, "renewSeconds": 5 },
-  "remote": { "mode": "local", "relay": {} },
+  "remote": { "role": null, "relay": {} },
   "channels": { "wechat": { "enabled": true } },
   "limits": { "maxTextBytes": 65536, "inboxBatch": 32 },
   "instanceSpawn": { "sessionPrefix": "rpi", "command": "rpi", "tmuxCommand": "tmux" }
@@ -151,14 +168,20 @@ token 也可以事后单独设置：`/mesh token <token>`。`/mesh status` 显�
 
 ## 跨机（办公室 ⇄ 服务器，不依赖 ssh）
 
-relay 跑在服务器（`remote.mode=relay`，监听 TCP/unix socket），办公室以
-`remote.mode=client` 直连。两种线上格式：直连 JSON-RPC（首帧 authenticate）与
-HTTP 表单端口（`http: true`，`POST /mesh-rpc`，token 在 `X-Mesh-Auth`）——专为
-「防火墙只放行转发到真实 HTTP 服务」的端口设计，nginx 可按路径反代。
+交互式组网（推荐，见上方「交互式组网」）：relay 机器 `/mesh relay [端口]`，其它机器
+`/mesh client <ip>:<端口> <token>`。角色持久化，重启自动恢复。
+
+两种线上格式：直连 JSON-RPC（首帧 authenticate）与 HTTP 表单端口（`http: true`，
+`POST /mesh-rpc`，token 在 `X-Mesh-Auth`）——专为「防火墙只放行转发到真实 HTTP 服务」
+的端口设计，nginx 可按路径反代。
 
 - token 文件 0600、常数时间比较、日志不落明文；非回环监听启动时警告。
 - client 断线指数退避重连（1→15s）并自动重认证；调用失败重试一次。
-- 两机共享 relay 侧的唯一 hub.db；完全无 ssh 依赖。
+- 全网共享 relay 侧的唯一 mesh.db；完全无 ssh 依赖。
+- **relay 机器上的监听权会自动漂移**：该机任何 mesh 实例都可接管监听（端口忙则 5s 重试，
+  当前监听者退出后自动顶上）；建议 relay 机器跑一个专职常驻实例（tmux while 保活）。
+- **故障影响面**：relay 失联时跨机功能停（明确挂，无脑裂），本机 agent/`/start` 不受影响；
+  微信消息积压在腾讯服务端，恢复后由持有者自动续上。
 
 详细见 `docs/architecture.md`。
 

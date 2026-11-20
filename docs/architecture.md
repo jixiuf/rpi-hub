@@ -10,19 +10,22 @@
 │  (单插件)  │             │             │  (单插件)  │             │
 └────────────┼─────────────┘             └────────────┼─────────────┘
              │                                        │
-        hub.db (本地, 单机时)              hub.db (relay 侧, 跨机时)
+        mesh.db (本地, 单机时)             mesh.db (relay 侧, 跨机时)
 ```
 
-- **本地**：所有实例直接打开同一个 `hub.db`（SQLite WAL），没有 daemon/端口/锁文件。
-- **跨机（已实现，不依赖 ssh）**：服务器侧 `remote.mode=relay` 监听 TCP（默认
-  `127.0.0.1:9527`）或 unix socket；办公机 `remote.mode=client` 直连 `relay.connect`。
-  办公机→服务器方向本来就可达，无需反向端口。
+- **本地**：所有实例直接打开同一个 `mesh.db`（SQLite WAL），没有 daemon/端口/锁文件。
+- **跨机（已实现，不依赖 ssh）**：host 侧实例 `remote.role=host` 监听 TCP（默认
+  `127.0.0.1:9527`）或 unix socket；guest 侧实例 `remote.role=guest` 直连 `connect`。
+  guest→host 方向本来就可达，无需反向端口。
+- **监听权漂移**：host 机器上任何 mesh 实例都可接管监听——bind 失败（端口忙）的实例
+  降级为 guest（连本机端口）并每 5s 重试 bind，当前监听者退出后自动升级回 host。端口
+  本身就是互斥量，无需租约协调。
 - 鉴权：共享 token 文件（0600，32 位 hex，relay 缺失时自动生成）。两种线上格式——
   - 直连 JSON-RPC：行分隔 `{id,method,params}` → `{id,result|error}`，首帧必须 `authenticate`；
-  - `"http": true`：`POST /hub-rpc`，token 在 `X-Hub-Auth` 头，一请求一 RPC。专为防火墙场景：
+  - `"http": true`：`POST /mesh-rpc`，token 在 `X-Mesh-Auth` 头，一请求一 RPC。专为防火墙场景：
     只放行"转发到真实 HTTP 服务"的端口时，relay 用 HTTP 应答，其它路径 404，可让 nginx 按
     路径反代到本机 relay。方法表见 `rpi-mesh-core::api::method`；插件只看到
-    `Arc<dyn HubStore>`，本地/远程同一套调用。
+    `Arc<dyn MeshStore>`，本地/远程同一套调用。
 - 客户端断线指数退避重连并自动重新认证；调用失败重试一次。relay 退出时 client 报
   `cannot reach the hub relay`（worker 300ms 重试，恢复即继续）。
 - 已在真实拓扑验证：办公室 WiFi → 公司防火墙 → apmprod:8085（`http:true`），跨机发现、
@@ -32,25 +35,31 @@
 
 ```sql
 instances(node_id PK, name, host, pid, cwd, session_id, title, model, role,
-          busy, epoch, started_at, last_seen)  UNIQUE(name, host)
-leases(capability PK, owner_node, owner_epoch, owner_name, generation,
-       expires_at, updated_at)
+          busy, epoch, started_at, last_seen,
+          channels)  UNIQUE(name, host)     -- channels: 实例可服务的通道能力（JSON）
+leases(capability PK, owner_node, owner_name, generation,
+       expires_at, updated_at, state_json)  -- state_json: 随租约走的运行态（cursor，加密）
 envelopes(id PK, to_node, from_node, from_name, kind, payload, correlation,
-          created_at, expires_at, acked_at)
+          created_at, expires_at, acked_at) -- payload: 整体 AES-256-GCM 加密
+channel_state(capability PK, state_json)    -- 共享通道事实（微信凭据，加密）
 seen(id PK, ts)
 kv(key PK, value)
 ```
+
+- `payload` 与 `channel_state.state_json` 落盘前 AES-256-GCM 加密；密钥在 DB 之外
+  （`RPI_MESH_SECRET` env 或 `<mesh 目录>/secret.key`，0600，全网一致）。
 
 - `node_id = sha256(host ‖ cwd ‖ pid)[..16]`：**同一进程内跨 `/reload` 不变**（pid/cwd 不变），
   重启即变——正是租约需要的粒度。
 - **显示名 = 项目目录名**：`name@host` 直接表达"哪个项目在哪台机器"（如 `rpi-mesh@office`、
   `pi-rust@server`）。`instanceName` 只是整机手动覆盖项，**默认不要设**——同机多个会话
   全部同名只能靠 `-<pid>` 后缀区分，对使用者不可读；目录名天然区分。
-- `epoch`：每次插件加载生成一次，所有写都必须匹配，用来 fencing 旧加载遗留的线程。
-- `payload` 存整个信封 JSON：新增 kind 不需要迁移表结构。
+- 单插件架构下无 per-load epoch fencing：role 切换通过 SwitchableStore 热切换，
+  进程内线程生命周期由插件 lifecycle 管理。
+- `payload` 存整个信封 JSON（加密）：新增 kind 不需要迁移表结构。
 - WAL + `busy_timeout=3000` + `BEGIN IMMEDIATE`（读-改-写）处理多进程并发。
 
-保留期：presence 30s（心跳 3s），text/cmd 2min，reply 10min，`seen` 30min，已 ack 的信封 1h。
+保留期：presence 10s（心跳 3s；跨机退出后 ~10s 从列表消失），text/cmd 2min，reply 10min，`seen` 30min，已 ack 的信封 1h。信封 payload 与凭据加密落盘。
 
 ## 3. 信封
 
@@ -71,13 +80,13 @@ kv(key PK, value)
 ## 4. 租约（谁接微信）
 
 ```sql
--- 认领：无租约 / 已过期 / 自己的（含 reload 换 epoch）→ 成功
-UPDATE leases SET owner_node=?, owner_epoch=?, owner_name=?,
+-- 认领：无租约 / 已过期 / 自己的 → 成功
+UPDATE leases SET owner_node=?, owner_name=?,
        generation = CASE WHEN owner_node=? AND expires_at>? THEN generation ELSE generation+1 END,
        expires_at=?+ttl
  WHERE capability=? AND (owner_node IS NULL OR owner_node=? OR expires_at<?);
 
--- 续约 / 发送前检查：owner_node + owner_epoch + generation 全匹配
+-- 续约 / 发送前检查：owner_node + generation 全匹配
 -- 转移：generation+1，旧持有者立刻被 fence
 ```
 
@@ -112,20 +121,30 @@ UPDATE leases SET owner_node=?, owner_epoch=?, owner_name=?,
 - footer（`SetStatus{key:"wechat"}`）只有两个写者：OwnerLoop（持有中：💬/💭）与
   watcher（非持有：🗨️/📴），全部从 store 事实渲染，不再有进程私有视图。
 
-## 5. worker
+## 5. 线程模型
 
-一个线程（`src/worker.rs`），周期：
+**worker**（`worker.rs`）周期：
 
 | 周期 | 动作 |
 | --- | --- |
-| 300ms | 读自己的信箱并处理（text/cmd/reply/notice），处理完 ack |
-| 3s | 心跳（带 busy/session/model）；返回 0 行说明 epoch 过期 → 退出 |
-| 5s | 租约续期 / 空闲时按 `autoClaim` 认领 |
-| 15s | `GetExecutionContext` 刷新 sessionId/model/cwd |
-| 60s | 清理死实例、孤儿租约、过期信封、旧 `seen` |
+| 300ms | 读自己的信箱并处理（text/cmd/reply/notice/assign），处理完 ack |
+| 3s | 心跳（带 busy/session/model/**channels 能力**）；行被过滤说明已死亡 |
+| 60s | 清理死实例（含 pid 探活）、孤儿租约、过期信封、旧 `seen` |
 
-`reload` 意图特殊处理：**先回包 ack**，再调 `Reload` action，然后请求本 load 退出，
-避免"重载把正在回包的人卸载掉"。
+**OwnerLoop**（`wechat/owner.rs`）周期：
+
+| 周期 | 动作 |
+| --- | --- |
+| 200ms | 事实轮询：租约行还归本实例所有？（丢租约检测） |
+| 5s | `renew` 续期；失败先 `claim`（暂停恢复），仍 Held 则退出并通知桥 |
+| 事件 | 桥退出（SessionExpired → 释放租约并置门闩） |
+
+**host_negotiator**（`backends.rs`，仅 host 角色）：bind 成功 → serving；
+bind busy → 降级 guest（连本机端口）+ 5s 重试 bind，成功则升级回 host。
+
+**watcher**（`wechat/commands.rs`，200ms）：无租约 / 过期且 30s 无续约 / owner 消失时接管。
+
+`reload` 意图特殊处理：**先回包 ack**，再调 `Reload` action，然后请求本 load 退出。
 通知类 message 走 `SendMessage{customType, display:true, triggerTurn:false}`，只显示不触发模型。
 
 ## 6. 委派（跨网络调研）
@@ -146,7 +165,7 @@ UPDATE leases SET owner_node=?, owner_epoch=?, owner_name=?,
 
 `hub_ask`/`hub_send`/`hub_cmd` 的寻址是对称的：任何实例（本机或经 relay
 连入的远端）都能向任何其它实例的信箱投递——办公机→服务器和
-服务器→办公机走的是同一条信箱路径（共享 hub.db / relay RPC），不依赖
+服务器→办公机走的是同一条信箱路径（共享 mesh.db / relay RPC），不依赖
 ssh。worker 300ms 轮询自己的信箱并 ack，`reply` 按 correlation 回到
 发起方。
 
