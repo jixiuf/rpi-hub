@@ -71,7 +71,9 @@ pub fn run(mesh: Arc<Mesh>) {
     }
 
     let _ = Arc::clone(&mesh.store).unregister_instance(&mesh.node_id, &mesh.epoch);
-    mesh.set_status("");
+    // No set_status("") here: during a /reload the NEW load writes its own
+    // status right after this, and clearing first just races it — the user
+    // saw the mesh footer slot go empty after /reloadall.
 }
 
 fn register(mesh: &Arc<Mesh>) -> Result<(), String> {
@@ -369,10 +371,7 @@ pub extern "C" fn finish_shutdown(_user_data: *mut std::ffi::c_void) -> i32 {
     mesh.stop_worker();
     let _ = Arc::clone(&mesh.store).unregister_instance(&mesh.node_id, &mesh.epoch);
     mesh.stop_backends();
-    let _ = mesh.action(
-        RuntimeActionId::SetStatus,
-        serde_json::json!({ "key": "mesh", "value": "" }),
-    );
+    // No status-slot clearing (same rationale as the worker-loop exit above).
     mesh::clear_current();
     0
 }
