@@ -326,18 +326,30 @@ fn ensure_relay_token(dir: &Path) -> Result<String, String> {
         let b = uuid::Uuid::new_v4().simple().to_string();
         format!("{}{}", &a[..16], &b[..16])
     };
-    std::fs::write(&path, format!("{token}\n"))
-        .map_err(|e| format!("cannot write relay-token: {e}"))?;
+    write_relay_token(&path, &token)?;
+    Ok(token)
+}
+
+/// Persist a relay token to the 0600 token file (clients type it in).
+fn write_relay_token(path: &Path, token: &str) -> Result<(), String> {
+    let token = token.trim();
+    if token.len() != 32 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "token 格式不对：应为 32 位十六进制（在 relay 机器上 /mesh token 获取）"
+        ));
+    }
+    std::fs::write(path, format!("{token}\n"))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = std::fs::metadata(&path) {
+        if let Ok(metadata) = std::fs::metadata(path) {
             let mut permissions = metadata.permissions();
             permissions.set_mode(0o600);
-            let _ = std::fs::set_permissions(&path, permissions);
+            let _ = std::fs::set_permissions(path, permissions);
         }
     }
-    Ok(token)
+    Ok(())
 }
 
 /// Assemble the core SpawnContext from the mesh Mesh. Also used by the
@@ -497,11 +509,23 @@ extern "C" fn cmd_mesh(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
                     .lease_observer
                     .holder("wechat")
                     .map_err(|e| e.to_string())?;
+                let remote_line = match mesh.config.remote.mode {
+                    rpi_mesh_core::config::RemoteMode::Relay => format!(
+                        "relay，监听 {}",
+                        mesh.config.remote.relay.listen.as_deref().unwrap_or("127.0.0.1:9527")
+                    ),
+                    rpi_mesh_core::config::RemoteMode::Client => format!(
+                        "client，连接 {}",
+                        mesh.config.remote.relay.connect.as_deref().unwrap_or("(未设置)")
+                    ),
+                    rpi_mesh_core::config::RemoteMode::Local => "local 单机".to_string(),
+                };
+                let token_path = mesh.dir().join("relay-token");
+                let token_state = if token_path.exists() { "已就位" } else { "未设置" };
                 Ok(format!(
-                    "构建: {BUILD}\n实例: {}\n节点: {}\n模式: {:?}\n实例数: {}\n待投递: {}/{} 条\n微信接管: {}",
+                    "构建: {BUILD}\n实例: {}\n节点: {}\n模式: {remote_line}\ntoken: {token_state}\n实例数: {}\n待投递: {}/{} 条\n微信接管: {}",
                     mesh.label(),
                     mesh.node_id,
-                    mesh.config.remote.mode,
                     stats.instances,
                     stats.envelopes_pending,
                     stats.envelopes_total,
@@ -540,26 +564,30 @@ extern "C" fn cmd_mesh(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
                 ))
             }
             "client" => {
-                // /mesh client <ip:port> — join a relay, persist, guide.
-                let endpoint = rest.trim().to_string();
-                if endpoint.is_empty() {
-                    return Err("用法: /mesh client <ip:端口>".into());
-                }
+                // /mesh client <ip:port> [token] — join a relay, persist.
+                // The token comes from the relay's /mesh relay output; typing
+                // it here writes relay-token directly (no file copying).
+                let parts: Vec<&str> = rest.trim().split_whitespace().collect();
+                let Some(endpoint) = parts.first() else {
+                    return Err("用法: /mesh client <ip:端口> [relay的token]".into());
+                };
                 let mut config = mesh.config.clone();
                 config.remote.mode = rpi_mesh_core::config::RemoteMode::Client;
-                config.remote.relay.connect = Some(endpoint.clone());
+                config.remote.relay.connect = Some(endpoint.to_string());
                 config.remote.relay.listen = None;
                 config.remote.relay.http = true;
                 rpi_mesh_core::config::write(mesh.dir(), &config)
                     .map_err(|e| format!("写入配置失败: {e}"))?;
                 let token_path = mesh.dir().join("relay-token");
-                let token_hint = if token_path.exists() {
-                    "relay-token 已就位".to_string()
-                } else {
-                    format!(
-                        "⚠ 尚无 relay-token：把 relay 机器的 ~/.rpi/agent/mesh/relay-token 复制到 {}（/mesh token 可查看）",
-                        token_path.display()
-                    )
+                let token_hint = match parts.get(1) {
+                    Some(token) => {
+                        write_relay_token(&token_path, token)?;
+                        format!("relay-token 已写入（来自你输入的 token）")
+                    }
+                    None if token_path.exists() => "relay-token 已就位".to_string(),
+                    None => format!(
+                        "⚠ 尚未设置 token：在 relay 机器上执行 /mesh token 获取，然后\n   /mesh token <token> 写入本机"
+                    ),
                 };
                 Ok(format!(
                     "✅ 已转为 client 模式（连接 {endpoint}，配置已保存，/reload 生效）\n{token_hint}"
@@ -575,8 +603,16 @@ extern "C" fn cmd_mesh(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
                 Ok("✅ 已转为 local 单机模式（配置已保存，/reload 生效）".to_string())
             }
             "token" => {
-                let token = ensure_relay_token(mesh.dir())?;
-                Ok(format!("relay-token: {token}"))
+                // /mesh token — show; /mesh token <value> — set (clients).
+                let value = rest.trim();
+                if value.is_empty() {
+                    let token = ensure_relay_token(mesh.dir())?;
+                    Ok(format!("relay-token: {token}"))
+                } else {
+                    let path = mesh.dir().join("relay-token");
+                    write_relay_token(&path, value)?;
+                    Ok("relay-token 已设置（/reload 生效）".to_string())
+                }
             }
             other => Err(format!(
                 "未知子命令 {other:?}；可用: status | relay [端口] | client <ip:端口> | local | token | who | name <名> | leave"

@@ -108,11 +108,12 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 **其它机器**（家里/办公室）：
 
 ```
-/mesh client <relay的IP>:<端口>    # 转为 client 模式（持久化到 config）
-                                    # 提示 relay-token 是否就位；/mesh token 可查看
-                                    # 把 relay 的 relay-token 复制到本机同路径
-/reload                            # 生效，自动连接 relay
+/mesh client <relay的IP>:<端口> <token>   # token 就是从 relay 输出里复制的那个
+/reload                                   # 生效，自动连接 relay
 ```
+
+token 也可以事后单独设置：`/mesh token <token>`。`/mesh status` 显示当前模式、
+监听/连接地址与 token 状态。
 
 `/mesh status` 查看当前模式；`/mesh local` 回单机模式。角色持久化在 config.json，
 重启后自动恢复。两台机器不互通没关系——只要各自能连 relay 即可。
