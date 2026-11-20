@@ -233,8 +233,8 @@ fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "mesh_start",
-            description: "Start a new rpi instance. Without 'executor' it starts on THIS machine in tmux; with 'executor' (any running instance) the start runs on THAT instance's machine instead.",
-            parameters: r#"{"type":"object","properties":{"dir":{"type":"string","description":"Working directory for the new instance (default: executor's cwd)"},"executor":{"type":"string","description":"Instance that performs the start; its machine hosts the new instance"}},"additionalProperties":false}"#,
+            description: "Start a new rpi instance. Omit 'machine' to start it on this machine; pass 'machine' (the name of any running instance, e.g. from mesh_instances) to start it on that instance's machine instead.",
+            parameters: r#"{"type":"object","properties":{"dir":{"type":"string","description":"Working directory for the new instance (default: the current working directory)"},"machine":{"type":"string","description":"Name of a running instance — the new instance starts on THAT machine. Omit to start on this machine."}},"additionalProperties":false}"#,
             execute: start_execute,
             poll: sync_poll,
             cancel: sync_cancel,
@@ -242,7 +242,7 @@ fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "mesh_stop",
-            description: "Stop a running rpi instance — local or remote (a remote target is stopped via another instance on its machine, or by itself if it is the only one there).",
+            description: "Stop a running rpi instance — works for instances on this machine and on remote machines (a remote target is stopped via another instance on its machine, or by itself if it is the only one there).",
             parameters: r#"{"type":"object","properties":{"target":{"type":"string","description":"Instance to stop (name, name@host, or /instances row number)"}},"required":["target"],"additionalProperties":false}"#,
             execute: stop_execute,
             poll: sync_poll,
@@ -382,7 +382,7 @@ fn run_start(params: &str) -> Result<String, String> {
     let mesh = require_mesh()?;
     let params = parse_params(params);
     let dir = params.get("dir").and_then(|v| v.as_str()).map(str::trim);
-    match params.get("executor").and_then(|v| v.as_str()).map(str::trim) {
+    match params.get("machine").and_then(|v| v.as_str()).map(str::trim) {
         Some(executor_query) if !executor_query.is_empty() => {
             // Cross-machine: forward to the executor instance.
             let executor = mesh.resolve_target(executor_query)?;
