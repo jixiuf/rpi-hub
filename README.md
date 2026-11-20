@@ -73,7 +73,9 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 /msg <实例> <内容>          发消息（fire-and-forget，对方不回话）
 /ask <实例> <任务>          委派任务（结果以通知形式回到本会话）
 /start [目录]               本机 tmux 启动新实例（缺省=当前实例目录；允许同目录多实例）
+/start <实例>:<目录>        跨机：让指定实例在它那台机器上启动新实例
 /stop <实例|编号>           停止本机实例的 tmux（租约自动交还）
+/stop <实例>:<实例|编号>    跨机：让指定实例停掉它那台机器上的目标实例
 /mesh relay|client|local|token|status（跨机组网与管理）
 /wechat login|start|stop|status
 ```
@@ -88,8 +90,7 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 /new                本实例开新会话
 /status             本实例状态
 /start [目录]       本机启动新实例（参数是路径，绝对路径可用）
-/stop <编号|名字>   停止本机实例（微信租约自动交还）
-/help               命令列表
+/stop <编号|名字>   停止本机实例（微信租约自动交还）/help               命令列表
 ```
 
 ## 交互式组网（免改配置，立即生效）
