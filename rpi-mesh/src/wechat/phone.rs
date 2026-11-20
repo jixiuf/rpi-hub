@@ -426,6 +426,7 @@ mod tests {
             host: "h1".into(),
             pid: 1,
             cwd: cwd.into(),
+            channels: serde_json::json!({}),
             role: "normal".into(),
             session_id: None,
             title: None,

@@ -1,6 +1,7 @@
 //! Plugin registration, commands, event handlers and the bridge thread.
 
 use std::sync::mpsc;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -68,9 +69,17 @@ pub fn bootstrap(mesh: &Arc<Channel>) {
     if crate::wechat::state::is_disabled(&dir) {
         return;
     }
+    // Credential sync: a fresh instance pulls the bound credentials from the
+    // shared store (published by whichever instance logged in), so ANY mesh
+    // instance can serve wechat without re-scanning a QR on that machine.
+    sync_credentials_from_store(mesh, &dir);
     let Some(credentials) = crate::wechat::state::Credentials::load(&dir) else {
         return;
     };
+    // Publish the capability fact: presence rows carry it, so /use can
+    // verify the target BEFORE handing the channel over.
+    mesh.mesh
+        .set_channel_capability("wechat", serde_json::json!({ "userId": credentials.user_id }));
     match spawn_bridge_public(mesh, &credentials) {
         Ok(()) => crate::wechat::channel::log("bridge auto-started"),
         Err(error) => crate::wechat::channel::log(&format!(
@@ -79,6 +88,62 @@ pub fn bootstrap(mesh: &Arc<Channel>) {
     }
     if !mesh.session_expired() {
         spawn_watcher(Arc::clone(mesh), credentials);
+    }
+}
+
+/// Pull credentials published to the shared store into the local file.
+/// Publishes local credentials the other direction if the store has none
+/// (or an older user binding) — whichever instance logged in shares with
+/// all of them. No conflict resolution beyond user_id: single-user system.
+fn sync_credentials_from_store(mesh: &Arc<Channel>, dir: &Path) {
+    let store = mesh.store();
+    let published = store
+        .channel_state("wechat:credentials")
+        .and_then(|state| state.get("credentials").cloned());
+    let local = crate::wechat::state::Credentials::load(dir);
+    match (published, local) {
+        (Some(published), None) => {
+            match serde_json::from_value::<Credentials>(published) {
+                Ok(credentials) => {
+                    if credentials.save(dir).is_ok() {
+                        crate::wechat::channel::log(&format!(
+                            "wechat: credentials pulled from the store (user={})",
+                            credentials.user_id
+                        ));
+                    }
+                }
+                Err(error) => crate::wechat::channel::log(&format!(
+                    "wechat: published credentials unparseable: {error}"
+                )),
+            }
+        }
+        (None, Some(local)) => {
+            // This instance holds the only copy: publish it.
+            let state = serde_json::json!({ "credentials": serde_json::to_value(&local).unwrap_or_default() });
+            store.set_channel_state("wechat:credentials", &state);
+            crate::wechat::channel::log("wechat: local credentials published to the store");
+        }
+        (Some(published), Some(local)) => {
+            // Both exist: they should be the same user binding. If the store
+            // has a different (presumably newer login), adopt the store's.
+            let same_user = published
+                .get("credentials")
+                .and_then(|c| c.get("userId"))
+                .and_then(|u| u.as_str())
+                .is_some_and(|u| u == local.user_id);
+            if !same_user {
+                if let Ok(credentials) = serde_json::from_value::<Credentials>(published) {
+                    let old_user = local.user_id.clone();
+                    if credentials.save(dir).is_ok() {
+                        crate::wechat::channel::log(&format!(
+                            "wechat: credentials re-synced from the store ({} → {})",
+                            old_user, credentials.user_id
+                        ));
+                    }
+                }
+            }
+        }
+        (None, None) => {}
     }
 }
 

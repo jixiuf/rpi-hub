@@ -12,6 +12,7 @@ fn record(node: &str, name: &str, host: &str, pid: u32, epoch: &str, now: i64) -
         pid,
         cwd: format!("/work/{node}"),
         role: "normal".into(),
+        channels: serde_json::json!({}),
         epoch: epoch.to_string(),
         session_id: Some(format!("session-{node}")),
         title: None,
@@ -371,9 +372,9 @@ fn assign_notifies_target_and_previous_owner() {
     store
         .register_instance(&record("n1", "home", "h1", 10, "e1", now), ALIVE)
         .unwrap();
-    store
-        .register_instance(&record("n2", "models", "h1", 11, "e2", now), ALIVE)
-        .unwrap();
+    let mut n2 = record("n2", "models", "h1", 11, "e2", now);
+    n2.channels = serde_json::json!({ "wechat": { "userId": "u2" } });
+    store.register_instance(&n2, ALIVE).unwrap();
 
     let admin = crate::lease::LeaseAdmin::new(store.clone(), TTL);
     let target = store.get_instance("n2").unwrap().unwrap();
@@ -398,13 +399,30 @@ fn assign_notifies_target_and_previous_owner() {
 }
 
 #[test]
+fn assign_rejects_a_target_without_the_capability() {
+    let (_dir, store) = file_store();
+    let store = std::sync::Arc::new(store);
+    let now = 1_000_000;
+    // n2 registers WITHOUT a wechat capability in its presence row.
+    store
+        .register_instance(&record("n2", "models", "h1", 11, "e2", now), ALIVE)
+        .unwrap();
+    let admin = crate::lease::LeaseAdmin::new(store.clone(), TTL);
+    let target = store.get_instance("n2").unwrap().unwrap();
+    let error = admin.assign_to("wechat", &target, now).unwrap_err();
+    assert!(error.contains("没有微信凭据"), "{error}");
+    // Nothing moved: the lease row must not exist.
+    assert!(store.lease_holder("wechat").unwrap().is_none());
+}
+
+#[test]
 fn assign_without_a_previous_owner_sends_only_the_assign() {
     let (_dir, store) = file_store();
     let store = std::sync::Arc::new(store);
     let now = 1_000_000;
-    store
-        .register_instance(&record("n2", "models", "h1", 11, "e2", now), ALIVE)
-        .unwrap();
+    let mut n2 = record("n2", "models", "h1", 11, "e2", now);
+    n2.channels = serde_json::json!({ "wechat": { "userId": "u2" } });
+    store.register_instance(&n2, ALIVE).unwrap();
     let admin = crate::lease::LeaseAdmin::new(store.clone(), TTL);
     let target = store.get_instance("n2").unwrap().unwrap();
     let generation = admin.assign_to("wechat", &target, now).unwrap();

@@ -115,6 +115,7 @@ mod tests {
             pid: 1,
             cwd: cwd.into(),
             role: "normal".into(),
+            channels: serde_json::json!({}),
             session_id: None,
             title: None,
             model: Some("gpt-x".into()),

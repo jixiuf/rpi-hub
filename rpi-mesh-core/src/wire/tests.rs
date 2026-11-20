@@ -78,6 +78,7 @@ fn record(node: &str, name: &str, now: i64) -> InstanceRecord {
         pid: 1,
         cwd: "/work".into(),
         role: "normal".into(),
+        channels: serde_json::json!({}),
         epoch: "e1".into(),
         session_id: Some("s1".into()),
         title: None,

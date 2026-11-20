@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS seen (
 CREATE INDEX IF NOT EXISTS seen_ts ON seen(ts);
 "#;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// How the store is opened: a file (normal) or memory (tests).
 pub struct Store {
@@ -106,6 +106,10 @@ pub struct InstanceRecord {
     pub cwd: String,
     /// `normal` or `subagent`.
     pub role: String,
+    /// Capabilities this instance can serve, e.g. `{"wechat":{"userId":"…"}}`.
+    /// Published on every heartbeat so `/use` can verify the target BEFORE
+    /// handing over a channel.
+    pub channels: serde_json::Value,
     /// Per-load uuid; a `/reload` produces a new epoch for the same `node_id`.
     pub epoch: String,
     pub session_id: Option<String>,
@@ -136,6 +140,7 @@ pub struct InstanceView {
     pub pid: u32,
     pub cwd: String,
     pub role: String,
+    pub channels: serde_json::Value,
     pub session_id: Option<String>,
     pub title: Option<String>,
     pub model: Option<String>,
@@ -322,6 +327,30 @@ impl Store {
             // SQLite 3.35+ supports DROP COLUMN; bundled rusqlite ships newer.
             conn.execute_batch("ALTER TABLE leases DROP COLUMN owner_epoch")?;
         }
+        // v3: instances gained `channels` (which capabilities this instance
+        // can actually serve — e.g. wechat credentials present).
+        let has_channels: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('instances') WHERE name = 'channels'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if has_channels == 0 {
+            // Racing openers can both pass the probe and both ALTER; SQLite
+            // rejects the second with "duplicate column name" — that is a
+            // success (the column now exists), not a failure.
+            if let Err(error) = conn.execute_batch(
+                "ALTER TABLE instances ADD COLUMN channels TEXT NOT NULL DEFAULT '{}'",
+            ) {
+                let duplicate = error
+                    .to_string()
+                    .contains("duplicate column name: channels");
+                if !duplicate {
+                    return Err(error.into());
+                }
+            }
+        }
         let found: Option<String> = conn
             .query_row(
                 "SELECT value FROM kv WHERE key='schema_version'",
@@ -395,10 +424,12 @@ impl Store {
             }
         }
 
+        let channels_text = serde_json::to_string(&record.channels)
+            .unwrap_or_else(|_| "{}".to_string());
         tx.execute(
             r#"INSERT INTO instances
-                 (node_id, name, host, pid, cwd, session_id, title, model, role, busy, epoch, started_at, last_seen)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 (node_id, name, host, pid, cwd, session_id, title, model, role, busy, epoch, started_at, last_seen, channels)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                ON CONFLICT(node_id) DO UPDATE SET
                  name = excluded.name,
                  host = excluded.host,
@@ -410,7 +441,8 @@ impl Store {
                  role = excluded.role,
                  busy = excluded.busy,
                  epoch = excluded.epoch,
-                 last_seen = excluded.last_seen"#,
+                 last_seen = excluded.last_seen,
+                 channels = excluded.channels"#,
             params![
                 record.node_id,
                 chosen,
@@ -425,6 +457,7 @@ impl Store {
                 record.epoch,
                 record.started_at,
                 record.last_seen,
+                channels_text,
             ],
         )?;
         tx.commit()?;
@@ -471,10 +504,11 @@ impl Store {
     pub fn list_instances(&self, now: i64, alive_ms: i64) -> Result<Vec<InstanceView>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut statement = conn.prepare(
-            r#"SELECT node_id, name, host, pid, cwd, session_id, title, model, role, busy, started_at, last_seen
+            r#"SELECT node_id, name, host, pid, cwd, session_id, title, model, role, busy, started_at, last_seen, channels
                FROM instances WHERE last_seen >= ?1 ORDER BY name, host"#,
         )?;
         let rows = statement.query_map(params![now - alive_ms.max(0)], |row| {
+            let channels_text: String = row.get(12)?;
             Ok(InstanceView {
                 node_id: row.get(0)?,
                 name: row.get(1)?,
@@ -488,6 +522,7 @@ impl Store {
                 busy: row.get::<_, i64>(9)? != 0,
                 started_at: row.get(10)?,
                 last_seen: row.get(11)?,
+                channels: serde_json::from_str(&channels_text).unwrap_or_default(),
             })
         })?;
         let mut out = Vec::new();
@@ -549,10 +584,11 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let view = conn
             .query_row(
-                r#"SELECT node_id, name, host, pid, cwd, session_id, title, model, role, busy, started_at, last_seen
+                r#"SELECT node_id, name, host, pid, cwd, session_id, title, model, role, busy, started_at, last_seen, channels
                    FROM instances WHERE node_id = ?1"#,
                 params![node_id],
                 |row| {
+                    let channels_text: String = row.get(12)?;
                     Ok(InstanceView {
                         node_id: row.get(0)?,
                         name: row.get(1)?,
@@ -566,6 +602,7 @@ impl Store {
                         busy: row.get::<_, i64>(9)? != 0,
                         started_at: row.get(10)?,
                         last_seen: row.get(11)?,
+                        channels: serde_json::from_str(&channels_text).unwrap_or_default(),
                     })
                 },
             )

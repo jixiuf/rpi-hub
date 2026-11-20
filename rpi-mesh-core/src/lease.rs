@@ -184,6 +184,21 @@ impl LeaseAdmin {
         target: &InstanceView,
         now: i64,
     ) -> Result<i64, String> {
+        // The target must actually be able to serve the channel: presence
+        // rows carry a per-instance `channels` capability map (e.g.
+        // wechat credentials present). Without this check /use could hand
+        // the channel to an instance that cannot poll it — the channel
+        // looks alive (lease held) while messages pile up server-side.
+        let serves = target
+            .channels
+            .get(capability)
+            .is_some_and(|detail| !detail.is_null());
+        if !serves {
+            return Err(format!(
+                "{} 没有微信凭据（未登录过），无法接管；先在目标实例上 /wechat login",
+                target.label()
+            ));
+        }
         // Read the previous owner BEFORE the row moves to the target.
         let previous = self
             .store

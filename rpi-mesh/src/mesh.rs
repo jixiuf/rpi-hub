@@ -102,6 +102,11 @@ pub struct Mesh {
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     pub replies: Mutex<HashMap<String, ReplyOutcome>>,
     pub last_error: Mutex<Option<String>>,
+    /// Capabilities this process can serve, published with every heartbeat.
+    /// Written by channel modules at bootstrap (e.g. wechat writes
+    /// `{"wechat":{"userId":"…"}}` when credentials exist). Presence rows
+    /// carry it so `/use` can verify a target BEFORE handing a channel over.
+    pub channel_capabilities: Mutex<serde_json::Value>,
 }
 
 static CURRENT: OnceLock<Mutex<Option<Arc<Mesh>>>> = OnceLock::new();
@@ -180,6 +185,7 @@ impl Mesh {
             worker: Mutex::new(None),
             replies: Mutex::new(HashMap::new()),
             last_error: Mutex::new(None),
+            channel_capabilities: Mutex::new(serde_json::json!({})),
         })
     }
 
@@ -376,6 +382,22 @@ impl Mesh {
         *self.last_error.lock().unwrap_or_else(|p| p.into_inner()) = Some(message);
     }
 
+    /// Publish a channel capability (e.g. wechat credentials fingerprint).
+    /// Merged into the presence row on every heartbeat.
+    pub fn set_channel_capability(&self, capability: &str, detail: serde_json::Value) {
+        let mut caps = self
+            .channel_capabilities
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if detail.is_null() {
+            if let Some(obj) = caps.as_object_mut() {
+                obj.remove(capability);
+            }
+        } else {
+            caps[capability] = detail;
+        }
+    }
+
     pub fn instances(&self, now: i64) -> Result<Vec<InstanceView>, String> {
         self.store
             .list_instances_alive(now, ALIVE_MS)
@@ -475,6 +497,11 @@ impl Mesh {
     /// Presence record for the store, built from the current session snapshot.
     pub fn record(&self, last_seen: i64) -> InstanceRecord {
         let snapshot = self.session_snapshot();
+        let channels = self
+            .channel_capabilities
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         InstanceRecord {
             node_id: self.node_id.clone(),
             name: self.name(),
@@ -482,6 +509,7 @@ impl Mesh {
             pid: self.pid,
             cwd: snapshot.cwd.unwrap_or_default(),
             role: "normal".to_string(),
+            channels,
             epoch: self.epoch.clone(),
             session_id: snapshot.session_id,
             title: None,
