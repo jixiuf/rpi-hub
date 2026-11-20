@@ -17,7 +17,7 @@
 - **跨机（已实现，不依赖 ssh）**：host 侧实例 `remote.role=host` 监听 TCP（默认
   `127.0.0.1:9527`）或 unix socket；guest 侧实例 `remote.role=guest` 直连 `connect`。
   guest→host 方向本来就可达，无需反向端口。
-- **监听权漂移**：host 机器上任何 mesh 实例都可接管监听——bind 失败（端口忙）的实例
+- **监听自动转移**：host 机器上任何 mesh 实例都可接管监听——bind 失败（端口忙）的实例
   降级为 guest（连本机端口）并每 5s 重试 bind，当前监听者退出后自动升级回 host。端口
   本身就是互斥量，无需租约协调。
 - 鉴权：共享 token 文件（0600，32 位 hex，relay 缺失时自动生成）。两种线上格式——
@@ -50,11 +50,11 @@ kv(key PK, value)
   （`RPI_MESH_SECRET` env 或 `<mesh 目录>/secret.key`，0600，全网一致）。
 
 - `node_id = sha256(host ‖ cwd ‖ pid)[..16]`：**同一进程内跨 `/reload` 不变**（pid/cwd 不变），
-  重启即变——正是租约需要的粒度。
+  重启即变——正好满足租约对「进程重启后换新身份」的要求。
 - **显示名 = 项目目录名**：`name@host` 直接表达"哪个项目在哪台机器"（如 `rpi-mesh@office`、
   `pi-rust@server`）。`instanceName` 只是整机手动覆盖项，**默认不要设**——同机多个会话
   全部同名只能靠 `-<pid>` 后缀区分，对使用者不可读；目录名天然区分。
-- 单插件架构下无 per-load epoch fencing：role 切换通过 SwitchableStore 热切换，
+- 单插件架构下不存在旧插件加载遗留线程的问题：role 切换通过 SwitchableStore 立即生效，
   进程内线程生命周期由插件 lifecycle 管理。
 - `payload` 存整个信封 JSON（加密）：新增 kind 不需要迁移表结构。
 - WAL + `busy_timeout=3000` + `BEGIN IMMEDIATE`（读-改-写）处理多进程并发。
@@ -108,7 +108,7 @@ UPDATE leases SET owner_node=?, owner_name=?,
   → 停止收发；目标 watcher 收到信号立即起桥 resume 租约（同 node_id →
   generation 不变）。
 - `/wechat stop` = `release_lease` + 持久化"用户显式停用"；会话过期（errcode -14）
-  时 OwnerLoop 释放租约并置 `session_expired` 门闩，watcher 不再自动重启死会话。
+  时 OwnerLoop 释放租约并标记 `session_expired`（登录过期），watcher 不再自动重启死会话。
 - **watcher 语义（防振荡）**：绝不抢未过期且 owner 健在的租约；只在「无租约行 /
   过期且 `updated_at` 超 30s 无续约 / owner 的 presence 行已消失」三种情况接管。
   `updated_at`（最近一次成功续约时间）是区分"过期但活跃续约"与"过期且已死"的事实依据。
@@ -135,9 +135,9 @@ UPDATE leases SET owner_node=?, owner_name=?,
 
 | 周期 | 动作 |
 | --- | --- |
-| 200ms | 事实轮询：租约行还归本实例所有？（丢租约检测） |
+| 200ms | 检查租约行是否还归本实例所有（检测租约被夺） |
 | 5s | `renew` 续期；失败先 `claim`（暂停恢复），仍 Held 则退出并通知桥 |
-| 事件 | 桥退出（SessionExpired → 释放租约并置门闩） |
+| 事件 | 桥退出（SessionExpired → 释放租约并标记登录过期） |
 
 **host_negotiator**（`backends.rs`，仅 host 角色）：bind 成功 → serving；
 bind busy → 降级 guest（连本机端口）+ 5s 重试 bind，成功则升级回 host。
@@ -149,19 +149,17 @@ bind busy → 降级 guest（连本机端口）+ 5s 重试 bind，成功则升�
 
 ## 6. 委派（跨网络调研）
 
-`hub_ask`：
+`mesh_ask` / `/ask`：
 
-1. 发送方插入 `replies[correlation] = pending` 占位（否则快回复会被当成"无人等待"的通知）。
-2. 发 `kind=text` + correlation 给目标。
-3. 目标 worker 注入 agent 输入，把 correlation 压入 `pending` 队列。
-4. 目标 `MessageEnd`（assistant 且有可见文本）→ 发 `kind=reply`；`TurnEndPayload` 为
-   `aborted/error` → 回失败。
-5. 发送方 worker 收到 reply → 填入 `replies` → `hub_ask` 的 `poll` 在下一次 tick 读到并返回。
-6. 超时/取消 → 删除占位；迟到的 reply 变成通知，不会静默丢弃。
+1. 发送方把任务文本作为信封投进目标实例的信箱。
+2. 目标实例把它交给自己的 agent 运行；**宿主的 `SendUserMessage` 会等运行结束**，
+   直接返回 `{status, text}`（最终回答或失败原因）。
+3. 目标实例把结果作为 reply 信封发回发送方，按任务编号对应——同时发多个任务也不会串。
+4. 发送失败、目标忙、目标实例未配置模型，都会明确回复失败原因，不会无声无息。
 
-默认 300s，上限 900s。目标在忙时 `SendUserMessage` 以 `deliverAs:"steer"` 排队。
+默认等待 300s，上限 900s。目标正在忙时消息会排队而非立即执行，发送方会被告知。
 
-## 6.5 双向信箱（含跨机）
+ 双向信箱（含跨机）
 
 `hub_ask`/`hub_send`/`hub_cmd` 的寻址是对称的：任何实例（本机或经 relay
 连入的远端）都能向任何其它实例的信箱投递——办公机→服务器和
@@ -194,5 +192,5 @@ ssh。worker 300ms 轮询自己的信箱并 ack，`reply` 按 correlation 回到
 apmprod（Linux，经公司防火墙可达）：`/mesh relay 8085` 交互式组网为 host，本机
 `/mesh client apmprod-IP:8085 <token>` 以 guest 直连。实测：跨机 presence、
 `/msg` `/ask`（回复经 relay 回传）、`/use` 交接微信（凭据自动同步到目标实例）、
-监听权漂移（杀当前 host，同机另一实例 5s 内接管）、信封与凭据的加密落盘。
+监听自动转移（杀当前 host，同机另一实例 5s 内接管）、信封与凭据的加密落盘。
 单机回归 `scripts/smoke.sh` 覆盖两实例、重名、唯一租约、/use 交接、双向信箱。

@@ -31,7 +31,7 @@ rpi dev-local -P rpi-mesh                     # 只加载本扩展，隔离排�
 - **跨 dylib 不存在进程内信号**：一个 rlib 被两个 dylib 静态链接时全局物两份。
   mesh 是单 dylib，如果未来再拆插件，记住这个教训（Condvar 信号会静默失效）。
 - **跨机角色状态机**（backends.rs）：host bind 失败自动降级 guest + 后台重试升级；
-  guest（同机）失联自动尝试 bind 接管。任何改动不得破坏这个闭环。
+  guest（同机）失联自动尝试 bind 接管。改 backends 时不能破坏这个行为。
 - **凭据同步**：登录实例发布到 mesh.db（加密），其它实例 bootstrap 拉取；presence 的
   `channels` 能力表是 `/use` 交接的校验依据——目标无能力必须拒绝。
 - **敏感数据加密**：envelope payload 与凭据落盘前 AES-256-GCM 加密；密钥在 DB 外
