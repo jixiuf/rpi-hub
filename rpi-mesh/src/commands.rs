@@ -31,7 +31,7 @@ pub fn registry() -> Vec<(&'static str, &'static str, CommandHandlerFn)> {
             "组网与管理：/mesh relay [端口]（本机作中继）/ client <ip:端口> [token]（连中继）/ local / status（模式与地址）/ token / who",
             cmd_mesh,
         ),
-        ("start", "本机启动新实例：/start [目录]（缺省=当前目录）", cmd_start),
+        ("start", "启动新实例：/start [目录]（本机）/ /start <实例>:<目录>（跨机）", cmd_start),
         ("stop", "停止本机实例：/stop <编号|名字>", cmd_stop),
     ]
 }
