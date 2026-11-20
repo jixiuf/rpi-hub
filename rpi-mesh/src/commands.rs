@@ -180,7 +180,7 @@ fn args_of(raw: StbStringRef) -> String {
 }
 
 fn mesh() -> Result<std::sync::Arc<Mesh>, String> {
-    mesh::current().ok_or_else(|| "rpi-mesh 未初始化".to_string())
+    mesh::current().ok_or_else(|| "rpi-mesh 正在重载或未就绪，请几秒后重试".to_string())
 }
 
 /// Split `"home /reload now"` into `("home", "/reload now")`.
