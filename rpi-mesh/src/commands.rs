@@ -219,42 +219,17 @@ extern "C" fn cmd_stop(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
     let args = args_of(raw);
     let query = args.trim();
     if query.is_empty() {
-        emit_error(out, "用法: /stop <编号|名字>（见 /instances）或 /stop <执行实例>:<目标实例> 跨机停止");
+        emit_error(out, "用法: /stop <实例|编号>（见 /instances）——目标在远端机器时会自动转发");
         return 0;
     }
     let result = mesh().and_then(|mesh| {
-        // "/stop <executor>:<target>" — explicit executor form.
-        if let Some((executor_query, target_query)) = query.split_once(':') {
-            let executor_query = executor_query.trim();
-            let target_query = target_query.trim();
-            if !executor_query.is_empty() && !target_query.is_empty() {
-                let executor = mesh.resolve_target(executor_query)?;
-                if executor.node_id != mesh.node_id {
-                    // Resolve the target HERE (this machine's list order);
-                    // forward its unique label — row numbers would mean a
-                    // different row on the executor's own list.
-                    let target = mesh.resolve_target(target_query)?;
-                    return forward_stop(&mesh, &executor, &target.label());
-                }
-                let spawn_ctx = spawn_ctx_from(&mesh);
-                return rpi_mesh_core::instance_start::stop(
-                    &spawn_ctx,
-                    target_query,
-                    rpi_mesh_core::now_ms(),
-                );
-            }
-        }
-        // Plain "/stop <target>": resolve the target first. Same machine →
-        // local stop. Remote machine → AUTO-FORWARD to a live instance on
-        // that machine (the user should not need to know which local
-        // instance to pick as executor).
+        // "/stop <target>" — one form for everything. The target is resolved
+        // first: same machine → local stop; remote machine → forwarded to a
+        // live instance on that machine (or to the target itself if it is
+        // the only one there — a self-shutdown).
         let instances = mesh.instances(now_ms())?;
         let target = resolve_target_by_list(&instances, query, mesh.node_id.as_str())?;
         if target.host != mesh.host {
-            // Prefer another live instance on the target's machine as the
-            // executor; if the target is the only instance there, send the
-            // terminate intent to the target itself (a self-shutdown, which
-            // stop_with_options allows for this path).
             let executor = instances
                 .iter()
                 .find(|i| i.host == target.host && i.node_id != target.node_id)
@@ -362,7 +337,7 @@ fn switch_backends(mesh: &Arc<Mesh>, config: &rpi_mesh_core::config::MeshConfig)
 
 /// Resolve a target from a given instance list (name / label / unique prefix /
 /// row number). Used by the auto-forward path in cmd_stop.
-fn resolve_target_by_list(
+pub(crate) fn resolve_target_by_list(
     instances: &[rpi_mesh_core::store::InstanceView],
     query: &str,
     _self_node: &str,

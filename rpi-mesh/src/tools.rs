@@ -242,8 +242,8 @@ fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "mesh_stop",
-            description: "Stop a running rpi instance. Without 'executor' the target must be on THIS machine; with 'executor' the stop runs on THAT instance's machine (for remote targets).",
-            parameters: r#"{"type":"object","properties":{"target":{"type":"string","description":"Instance to stop (name or /instances row number)"},"executor":{"type":"string","description":"Instance that performs the stop; its machine must host the target"}},"required":["target"],"additionalProperties":false}"#,
+            description: "Stop a running rpi instance — local or remote (a remote target is stopped via another instance on its machine, or by itself if it is the only one there).",
+            parameters: r#"{"type":"object","properties":{"target":{"type":"string","description":"Instance to stop (name, name@host, or /instances row number)"}},"required":["target"],"additionalProperties":false}"#,
             execute: stop_execute,
             poll: sync_poll,
             cancel: sync_cancel,
@@ -397,21 +397,22 @@ fn run_start(params: &str) -> Result<String, String> {
 }
 
 fn run_stop(params: &str) -> Result<String, String> {
+    // Same auto-routing as /stop: resolve the target, stop locally or forward
+    // to the target's machine (or to the target itself if it is alone there).
     let mesh = require_mesh()?;
     let params = parse_params(params);
     let target_query = param_str(&params, "target")?;
-    match params.get("executor").and_then(|v| v.as_str()).map(str::trim) {
-        Some(executor_query) if !executor_query.is_empty() => {
-            // Cross-machine: resolve the target HERE, forward its unique label.
-            let executor = mesh.resolve_target(executor_query)?;
-            let target = mesh.resolve_target(target_query)?;
-            crate::commands::forward_stop(&mesh, &executor, &target.label())
-        }
-        _ => {
-            let spawn_ctx = spawn_ctx_from(&mesh);
-            rpi_mesh_core::instance_start::stop(&spawn_ctx, target_query, rpi_mesh_core::now_ms())
-        }
+    let instances = mesh.instances(rpi_mesh_core::now_ms())?;
+    let target = crate::commands::resolve_target_by_list(&instances, target_query, &mesh.node_id)?;
+    if target.host != mesh.host {
+        let executor = instances
+            .iter()
+            .find(|i| i.host == target.host && i.node_id != target.node_id)
+            .unwrap_or(&target);
+        return crate::commands::forward_stop(&mesh, executor, &target.label());
     }
+    let spawn_ctx = spawn_ctx_from(&mesh);
+    rpi_mesh_core::instance_start::stop(&spawn_ctx, target_query, rpi_mesh_core::now_ms())
 }
 
 fn describe_transfer(capability: &str, label: &str, generation: i64) -> String {
