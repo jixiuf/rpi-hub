@@ -205,6 +205,24 @@ extern "C" fn cmd_start(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void
             }
         }
         let arg = args.trim();
+        // Bare number = an /instances row number: start a new instance on
+        // THAT instance's machine, using that instance's cwd (remote → the
+        // spawn intent carries no cwd; the target uses its own).
+        if let Ok(number) = arg.parse::<usize>() {
+            if number == 0 {
+                return Err("编号从 1 开始（见 /instances）".into());
+            }
+            let instances = mesh.instances(now_ms())?;
+            let target = instances
+                .get(number - 1)
+                .ok_or_else(|| format!("没有编号为 {number} 的实例"))?;
+            if target.node_id != mesh.node_id {
+                return forward_start(&mesh, target, "");
+            }
+            // Self: local start with the target's cwd.
+            let spawn_ctx = spawn_ctx_from(&mesh);
+            return rpi_mesh_core::instance_start::start(&spawn_ctx, Some(target.cwd.as_str()));
+        }
         let arg_opt = (!arg.is_empty()).then_some(arg);
         let spawn_ctx = spawn_ctx_from(&mesh);
         rpi_mesh_core::instance_start::start(&spawn_ctx, arg_opt)

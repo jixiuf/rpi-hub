@@ -362,6 +362,35 @@ pub fn execute(mesh: &Arc<Channel>, command: WxCommand) -> Result<String, String
         WxCommand::Status => Ok(status_text(mesh, now)),
         WxCommand::Help => Ok(HELP.to_string()),
         WxCommand::Start(cwd) => {
+            // Bare number = an /instances row number: start a new instance on
+            // that instance's machine (its own cwd).
+            if let Some(text) = cwd.as_deref() {
+                if let Ok(number) = text.trim().parse::<usize>() {
+                    let now = rpi_mesh_core::now_ms();
+                    let instances = mesh
+                        .mesh
+                        .store
+                        .list_instances_alive(now, crate::mesh::ALIVE_MS)
+                        .map_err(|e| e.to_string())?;
+                    let target = instances
+                        .get(number.wrapping_sub(1))
+                        .ok_or_else(|| format!("没有编号为 {number} 的实例"))
+                        .map_err(|e| e.to_string())?;
+                    if target.node_id != mesh.node_id() {
+                        return crate::commands::forward_start(
+                            &mesh.mesh,
+                            target,
+                            &target.cwd,
+                        );
+                    }
+                    let store_dyn = Arc::clone(&mesh.store()) as Arc<dyn MeshStore>;
+                    let spawn_ctx = start_ctx(mesh, Some(target.cwd.as_str()), &store_dyn);
+                    return rpi_mesh_core::instance_start::start(
+                        &spawn_ctx,
+                        Some(target.cwd.as_str()),
+                    );
+                }
+            }
             // Cross-machine form: "<instance>:<dir>" — forward to that
             // instance's machine (same as the TUI's /start forwarding).
             if let Some(cwd) = cwd.as_ref().filter(|c| c.contains(':')) {
