@@ -96,22 +96,25 @@ impl LeaseConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum RemoteMode {
-    /// This node owns the database; no cross-machine traffic.
-    #[default]
-    Local,
-    /// This node owns the database *and* serves remote nodes on `relay`.
-    Relay,
-    /// This node's mesh state lives on a relay reached through `relay`.
-    Client,
+
+/// The instance's networking intent. Absent = pure local (no cross-machine).
+/// `host` = serve the shared mesh.db for guests; `guest` = all state lives on
+/// a host reached through `connect`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteRole {
+    /// Serve mesh.db for guest instances (binds `listen`).
+    Host,
+    /// All state lives on a host reached through `connect`.
+    Guest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RemoteConfig {
-    pub mode: RemoteMode,
+    /// None = pure local. Some(role) = cross-machine participation.
+    pub role: Option<RemoteRole>,
+    /// Host: the address to serve on. Guest: the host to connect to.
     pub relay: RelayConfig,
 }
 
@@ -347,7 +350,7 @@ mod tests {
 
         let mut changed = config.clone();
         changed.instance_name = Some("home".into());
-        changed.remote.mode = RemoteMode::Client;
+        changed.remote.role = Some(crate::config::RemoteRole::Guest);
         write(&dir, &changed).unwrap();
         let (reloaded, warnings) = load(&dir).unwrap();
         assert!(warnings.is_empty());

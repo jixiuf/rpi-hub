@@ -102,10 +102,7 @@ pub fn instances_text(mesh: &Arc<Channel>, now: i64) -> Result<String, String> {
     let viewer = RenderContext {
         viewer_node_id: &mesh.node_id(),
         wechat_holder_node: holder_node.as_deref(),
-        remote: !matches!(
-            mesh.config().remote.mode,
-            rpi_mesh_core::config::RemoteMode::Local
-        ),
+        remote: mesh.mesh.config.remote.role.is_some(),
     };
     let holder_triple = holder.map(|h| (h.full_name(), h.generation, h.expires_at));
     Ok(render_instances_text(
@@ -331,7 +328,7 @@ fn start_ctx<'a>(
             .unwrap_or_default(),
     };
     rpi_mesh_core::instance_start::SpawnContext {
-        store: store_dyn,
+        store: store_dyn.clone(),
         node_id: &mesh.node_id(),
         host: &mesh.mesh.host,
         cwd,

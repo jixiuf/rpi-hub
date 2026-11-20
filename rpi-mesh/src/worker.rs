@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rpi_mesh_core::api::MeshStore;
 use rpi_mesh_core::now_ms;
 use rpi_mesh_core::protocol::{Envelope, EnvelopeKind};
 use rpi_mesh_core::store::Heartbeat;
@@ -27,13 +28,12 @@ pub fn run(mesh: Arc<Mesh>) {
     // The mesh slot identifies THIS instance and the relay mode. Local mode
     // shows just the full name (instance count carries no actionable info);
     // relay/client append the mode, since cross-machine behavior changes.
-    // 💻 marks the mesh (compute node); 📡 marks cross-machine mode — a relay
-    // serves other nodes, a client reaches a remote one. Local mode shows
-    // just 💻 + identity (no cross-machine fact to announce).
-    let mode_glyph = match mesh.config.remote.mode {
-        rpi_mesh_core::config::RemoteMode::Relay => "📡️",
-        rpi_mesh_core::config::RemoteMode::Client => "💻",
-        rpi_mesh_core::config::RemoteMode::Local => "🏠",
+    // 📡 marks cross-machine participation (host serving guests / guest
+    // reaching a host); 🏠 is pure local — no cross-machine fact to announce.
+    let mode_glyph = if mesh.config.remote.role.is_some() {
+        "📡️"
+    } else {
+        "🏠"
     };
     mesh.set_status(&format!("{} {mode_glyph}", mesh.label()));
 
@@ -70,7 +70,7 @@ pub fn run(mesh: Arc<Mesh>) {
         mesh.shutdown().wait(DISPATCH);
     }
 
-    let _ = mesh.store.unregister_instance(&mesh.node_id, &mesh.epoch);
+    let _ = Arc::clone(&mesh.store).unregister_instance(&mesh.node_id, &mesh.epoch);
     mesh.set_status("");
 }
 
@@ -123,7 +123,7 @@ fn heartbeat(mesh: &Arc<Mesh>) -> bool {
         title: None,
         model: snapshot.model,
     };
-    match mesh.store.heartbeat(&mesh.node_id, &mesh.epoch, now, &beat) {
+    match mesh.store_dyn().heartbeat(&mesh.node_id, &mesh.epoch, now, &beat) {
         Ok(alive) => alive,
         Err(error) => {
             mesh::log(&format!("heartbeat failed: {error}"));
@@ -134,7 +134,7 @@ fn heartbeat(mesh: &Arc<Mesh>) -> bool {
 
 fn dispatch(mesh: &Arc<Mesh>) {
     let now = now_ms();
-    let envelopes = match mesh.store.inbox(&mesh.node_id, now, mesh.inbox_batch()) {
+    let envelopes = match mesh.store_dyn().inbox(&mesh.node_id, now, mesh.inbox_batch()) {
         Ok(envelopes) => envelopes,
         Err(error) => {
             mesh.record_error(format!("mailbox read failed: {error}"));
@@ -334,7 +334,7 @@ fn housekeeping(mesh: &Arc<Mesh>) {
             mesh::log(&format!("reaped {dropped} dead local presence rows"));
         }
     }
-    match mesh.store.prune(now_ms(), ALIVE_MS) {
+    match mesh.store_dyn().prune(now_ms(), ALIVE_MS) {
         Ok(report) => {
             if report.instances + report.envelopes + report.seen > 0 {
                 mesh::log(&format!(
@@ -367,7 +367,7 @@ pub extern "C" fn finish_shutdown(_user_data: *mut std::ffi::c_void) -> i32 {
     };
     mesh.request_shutdown();
     mesh.stop_worker();
-    let _ = mesh.store.unregister_instance(&mesh.node_id, &mesh.epoch);
+    let _ = Arc::clone(&mesh.store).unregister_instance(&mesh.node_id, &mesh.epoch);
     mesh.stop_backends();
     let _ = mesh.action(
         RuntimeActionId::SetStatus,

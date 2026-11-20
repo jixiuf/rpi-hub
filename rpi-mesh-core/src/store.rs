@@ -16,7 +16,7 @@
 //! open the same file.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -1295,3 +1295,131 @@ mod pid_tests {
 
 #[cfg(test)]
 mod tests;
+
+/// A MeshStore whose implementation is swappable at runtime — the piece that
+/// makes `/mesh relay|client` take effect immediately.
+///
+/// The mesh state holds `Arc<SwitchableStore>`; every long-lived thread
+/// (worker, owner loop, watcher, bridge) keeps only that Arc. A role switch
+/// replaces the inner store: in-flight calls finish against the old
+/// implementation, every new call routes to the new one. Facts live in the
+/// database itself, so the proxy is pure routing — no merge, no split brain.
+///
+/// `reap_dead_local_instances` forwards to the current inner store, which
+/// no-ops when that inner store is a remote client (foreign pids are
+/// meaningless) and reaps when it is a local Store.
+#[derive(Debug)]
+pub struct SwitchableStore {
+    inner: Mutex<Arc<dyn MeshStore>>,
+}
+
+impl SwitchableStore {
+    pub fn new(initial: Arc<dyn MeshStore>) -> Self {
+        Self {
+            inner: Mutex::new(initial),
+        }
+    }
+
+    /// Swap the active implementation. In-flight calls finish on the old one.
+    pub fn switch(&self, new_store: Arc<dyn MeshStore>) {
+        *self.inner.lock().expect("switchable store mutex") = new_store;
+    }
+
+    fn current(&self) -> Arc<dyn MeshStore> {
+        Arc::clone(&self.inner.lock().expect("switchable store mutex"))
+    }
+}
+
+/// Mechanical forwarding for every MeshStore method.
+impl MeshStore for SwitchableStore {
+    fn register_instance(&self, record: &InstanceRecord, alive_ms: i64) -> Result<RegisteredInstance> {
+        self.current().register_instance(record, alive_ms)
+    }
+    fn heartbeat(&self, node_id: &str, epoch: &str, now: i64, beat: &Heartbeat) -> Result<bool> {
+        self.current().heartbeat(node_id, epoch, now, beat)
+    }
+    fn list_instances(&self, now: i64, alive_ms: i64) -> Result<Vec<InstanceView>> {
+        self.current().list_instances(now, alive_ms)
+    }
+    fn get_instance(&self, node_id: &str) -> Result<Option<InstanceView>> {
+        self.current().get_instance(node_id)
+    }
+    fn claim_lease(
+        &self,
+        capability: &str,
+        node_id: &str,
+        node_name: &str,
+        now: i64,
+        ttl_ms: i64,
+    ) -> Result<Claim> {
+        self.current().claim_lease(capability, node_id, node_name, now, ttl_ms)
+    }
+    fn renew_lease(
+        &self,
+        capability: &str,
+        node_id: &str,
+        generation: i64,
+        now: i64,
+        ttl_ms: i64,
+    ) -> Result<bool> {
+        self.current().renew_lease(capability, node_id, generation, now, ttl_ms)
+    }
+    fn check_lease(&self, capability: &str, node_id: &str, generation: i64, now: i64) -> Result<bool> {
+        self.current().check_lease(capability, node_id, generation, now)
+    }
+    fn assign_lease(
+        &self,
+        capability: &str,
+        to_node: &str,
+        to_name: &str,
+        now: i64,
+        ttl_ms: i64,
+    ) -> Result<i64> {
+        self.current().assign_lease(capability, to_node, to_name, now, ttl_ms)
+    }
+    fn release_lease(&self, capability: &str, node_id: &str, generation: i64) -> Result<bool> {
+        self.current().release_lease(capability, node_id, generation)
+    }
+    fn lease_holder(&self, capability: &str) -> Result<Option<LeaseHolder>> {
+        self.current().lease_holder(capability)
+    }
+    fn list_leases(&self) -> Result<Vec<(String, LeaseHolder)>> {
+        self.current().list_leases()
+    }
+    fn send_envelope(&self, envelope: &Envelope) -> Result<bool> {
+        self.current().send_envelope(envelope)
+    }
+    fn inbox(&self, node_id: &str, now: i64, limit: i64) -> Result<Vec<Envelope>> {
+        self.current().inbox(node_id, now, limit)
+    }
+    fn ack_envelope(&self, id: &str, node_id: &str, now: i64) -> Result<bool> {
+        self.current().ack_envelope(id, node_id, now)
+    }
+    fn mark_seen(&self, id: &str, now: i64) -> Result<bool> {
+        self.current().mark_seen(id, now)
+    }
+    fn prune(&self, now: i64, alive_ms: i64) -> Result<PruneReport> {
+        self.current().prune(now, alive_ms)
+    }
+    fn stats(&self, now: i64) -> Result<Stats> {
+        self.current().stats(now)
+    }
+    fn channel_state(&self, capability: &str) -> Option<serde_json::Value> {
+        self.current().channel_state(capability)
+    }
+    fn set_channel_state(&self, capability: &str, state: &serde_json::Value) {
+        self.current().set_channel_state(capability, state)
+    }
+    fn lease_cursor(&self, capability: &str) -> Option<String> {
+        self.current().lease_cursor(capability)
+    }
+    fn set_lease_cursor(&self, capability: &str, cursor: &str) {
+        self.current().set_lease_cursor(capability, cursor)
+    }
+    fn reap_dead_local_instances(&self) -> Result<usize> {
+        self.current().reap_dead_local_instances()
+    }
+    fn unregister_instance(&self, node_id: &str, epoch: &str) -> Result<bool> {
+        self.current().unregister_instance(node_id, epoch)
+    }
+}

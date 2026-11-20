@@ -1,156 +1,254 @@
-//! Which database a node talks to.
+//! Which mesh.db this instance reads and writes, and who serves it.
 //!
-//! - `local`  — this process opens `mesh.db` directly (single machine).
-//! - `relay`  — this process opens `mesh.db` **and** serves it on a unix socket
-//!   for remote nodes (normally the always-on server).
-//! - `client` — all state lives on a relay, reached through an SSH stream-local
-//!   forward this process supervises.
+//! Two roles, decided at startup and re-negotiated at runtime:
 //!
-//! The rest of the plugin only sees `Arc<dyn MeshStore>`.
+//! - **host** — opens the local `mesh.db` and serves it to guests on
+//!   `listen`. The port is the mutex: exactly one host per address.
+//! - **guest** — all state lives on a host reached through `connect`.
+//!
+//! Runtime re-negotiation (no config change needed):
+//! - a host whose port is busy downgrades to guest (connecting to that same
+//!   port locally) and keeps retrying the bind in the background — when the
+//!   current host dies, it upgrades back;
+//! - a guest whose host dies attempts to bind itself **when the host is on
+//!   the same machine** (`connect` targets localhost) — taking over the
+//!   mesh.db that used to live there. Cross-machine guests just keep
+//!   reconnecting.
+//!
+//! The rest of the plugin sees `Arc<dyn MeshStore>` — a switchable proxy, so
+//! role changes take effect on the next call without touching any thread.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use rpi_mesh_core::api::MeshStore;
-use rpi_mesh_core::config::{MeshConfig, RemoteMode};
+use rpi_mesh_core::config::{MeshConfig, RelayConfig, RemoteRole};
 use rpi_mesh_core::paths;
 use rpi_mesh_core::store::Store;
-use rpi_mesh_core::wire::{load_token, serve, Endpoint, RemoteStore};
+use rpi_mesh_core::wire::{load_token, serve, Endpoint, RemoteStore, Token};
 
 use crate::mesh::log;
+use rpi_mesh_core::store::SwitchableStore;
+
+const RETRY_TICK: Duration = Duration::from_secs(5);
 
 pub struct Backends {
+    /// The switchable proxy. `store` is its dyn handle; `switch_store` reroutes.
+    pub proxy: Arc<SwitchableStore>,
     pub store: Arc<dyn MeshStore>,
     pub description: String,
-    relay_stop: Option<Arc<AtomicBool>>,
-    relay_join: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Parsed intent for this instance.
+#[derive(Clone)]
+enum Intent {
+    /// Host intent: serve `listen` for guests.
+    Host { listen: Endpoint, token: Token, http: bool },
+    /// Guest intent: all state on the host at `connect`.
+    Guest { connect: Endpoint, token: Token, http: bool },
 }
 
 impl Backends {
     pub fn start(dir: &Path, config: &MeshConfig) -> Result<Self, String> {
-        let relay = &config.remote.relay;
-        match config.remote.mode {
-            RemoteMode::Local => {
-                let store = Arc::new(Store::open(dir).map_err(|e| e.to_string())?);
-                Ok(Self {
-                    store,
+        let relay_cfg = &config.remote.relay;
+        let intent = match config.remote.role {
+            None => {
+                // Pure local: own mesh.db, no networking.
+                let store = Arc::new(SwitchableStore::new(Arc::new(
+                    Store::open(dir).map_err(|e| e.to_string())?,
+                )));
+                let proxy = Arc::new(SwitchableStore::new(store));
+                return Ok(Self {
+                    proxy: Arc::clone(&proxy),
+                    store: proxy as Arc<dyn MeshStore>,
                     description: format!("local {}", dir.display()),
-                    relay_stop: None,
-                    relay_join: None,
-                })
+                    stop: Arc::new(AtomicBool::new(false)),
+                    join: None,
+                });
             }
-            RemoteMode::Relay => {
-                let store = Arc::new(Store::open(dir).map_err(|e| e.to_string())?);
-                let endpoint = match relay.listen.as_deref() {
-                    Some(text) => Endpoint::parse(text).map_err(|e| e.to_string())?,
-                    None => Endpoint::Tcp("127.0.0.1".into(), 9527),
-                };
-                // Generate/validate the token eagerly so a bad tokenFile fails
-                // at startup instead of at the first remote connection, and hand
-                // THE token to serve() — the file path is config, not guesswork.
+            Some(RemoteRole::Host) => {
+                let listen = listen_endpoint(relay_cfg)?;
                 let token = load_token(&token_path(dir, config), true)
                     .map_err(|e| e.to_string())?;
-                if !endpoint.is_loopback() {
-                    log(&format!(
-                        "relay listening on {endpoint:?} (non-loopback); the shared token is the only defense"
-                    ));
+                Intent::Host {
+                    listen,
+                    token,
+                    http: relay_cfg.http,
                 }
-                let stop = Arc::new(AtomicBool::new(false));
-                let endpoint_for_thread = endpoint.clone();
-                let http = relay.http;
-                let store_for_thread = Arc::clone(&store);
-                let stop_for_thread = Arc::clone(&stop);
-                // Listen-right drift: ANY mesh instance on this machine can
-                // end up serving the relay. If the port is taken (another
-                // instance grabbed it), retry every 5s instead of giving up —
-                // when the current listener exits, the next instance takes
-                // over automatically and the mesh survives its death.
-                let join = std::thread::Builder::new()
-                    .name("rpi-mesh-relay".into())
-                    .spawn(move || {
-                        loop {
-                            if stop_for_thread.load(std::sync::atomic::Ordering::Acquire) {
-                                break;
-                            }
-                            log(&format!("relay serving {endpoint_for_thread:?}"));
-                            match serve(
-                                &endpoint_for_thread,
-                                Arc::clone(&store_for_thread),
-                                Arc::clone(&stop_for_thread),
-                                http,
-                                token.clone(),
-                            ) {
-                                Ok(()) => break, // clean shutdown
-                                Err(error) => {
-                                    let busy = error.to_string().contains("already listening")
-                                        || error.to_string().contains("Address already in use");
-                                    if busy {
-                                        log(&format!(
-                                            "relay port busy — retrying in 5s (the mesh survives if the current listener dies)"
-                                        ));
-                                        // Interruptible wait on the stop flag.
-                                        let deadline = std::time::Instant::now()
-                                            + std::time::Duration::from_secs(5);
-                                        while std::time::Instant::now() < deadline {
-                                            if stop_for_thread
-                                                .load(std::sync::atomic::Ordering::Acquire)
-                                            {
-                                                break;
-                                            }
-                                            std::thread::sleep(std::time::Duration::from_millis(200));
-                                        }
-                                        continue;
-                                    }
-                                    log(&format!("relay stopped: {error}"));
-                                    break;
-                                }
-                            }
-                        }
-                    })
-                    .map_err(|e| e.to_string())?;
-                Ok(Self {
-                    store,
-                    description: format!(
-                        "relay {endpoint:?}{}",
-                        if relay.http { " (http)" } else { "" }
-                    ),
-                    relay_stop: Some(stop),
-                    relay_join: Some(join),
-                })
             }
-            RemoteMode::Client => {
-                let endpoint = relay
-                    .connect
-                    .as_deref()
-                    .map(Endpoint::parse)
-                    .ok_or_else(|| {
-                        "remote.relay.connect is required for remote.mode=client".to_string()
-                    })
-                    .and_then(|r| r.map_err(|e| e.to_string()))?;
+            Some(RemoteRole::Guest) => {
+                let connect = connect_endpoint(relay_cfg)?;
                 let token = load_token(&token_path(dir, config), false)
                     .map_err(|e| e.to_string())?;
-                Ok(Self {
-                    store: Arc::new(RemoteStore::with_http(endpoint.clone(), token, relay.http)),
-                    description: format!(
-                        "client {endpoint:?}{}",
-                        if relay.http { " (http)" } else { "" }
-                    ),
-                    relay_stop: None,
-                    relay_join: None,
-                })
+                Intent::Guest {
+                    connect,
+                    token,
+                    http: relay_cfg.http,
+                }
             }
-        }
+        };
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let proxy = Arc::new(SwitchableStore::new(match &intent {
+            Intent::Host { .. } => {
+                Arc::new(Store::open(dir).map_err(|e| e.to_string())?) as Arc<dyn MeshStore>
+            }
+            Intent::Guest { connect, token, http } => guest_store(connect, *http, token),
+        }));
+
+        // Host intent runs the negotiator thread (bind attempts + downgrade/
+        // upgrade). Guest intent has no thread: RemoteStore reconnects itself.
+        let join = match &intent {
+            Intent::Host { .. } => Some(
+                std::thread::Builder::new()
+                    .name("rpi-mesh-host".into())
+                    .spawn({
+                        let stop = Arc::clone(&stop);
+                        let proxy = Arc::clone(&proxy);
+                        let dir = dir.to_path_buf();
+                        let intent = intent.clone();
+                        move || host_negotiator(&dir, intent, proxy, stop)
+                    })
+                    .map_err(|e| e.to_string())?,
+            ),
+            Intent::Guest { .. } => None,
+        };
+
+        let description = match &intent {
+            Intent::Host { listen, .. } => {
+                format!("host {listen:?} (bind attempts until it wins)")
+            }
+            Intent::Guest { connect, .. } => format!("guest {connect:?}"),
+        };
+
+        Ok(Self {
+            proxy: Arc::clone(&proxy),
+            store: proxy as Arc<dyn MeshStore>,
+            description,
+            stop,
+            join,
+        })
     }
 
     pub fn shutdown(&mut self) {
-        if let Some(stop) = self.relay_stop.take() {
-            stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        if let Some(join) = self.relay_join.take() {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(join) = self.join.take() {
             let _ = join.join();
         }
     }
+}
+
+/// The host-intent state machine. Runs on its own thread.
+///
+/// States: HOST (serving) and DEGRADED (port busy → guest against the local
+/// port). Transitions: bind succeeds → HOST; bind busy → DEGRADED; while
+/// DEGRADED, retry the bind every tick — winning it upgrades back to HOST.
+fn host_negotiator(
+    dir: &Path,
+    intent: Intent,
+    proxy: Arc<SwitchableStore>,
+    stop: Arc<AtomicBool>,
+) {
+    let Intent::Host {
+        listen,
+        token,
+        http,
+    } = intent
+    else {
+        return;
+    };
+    let local_store = || -> Arc<Store> {
+        match Store::open(dir) {
+            Ok(store) => Arc::new(store),
+            Err(error) => {
+                log(&format!("host: cannot open local store: {error}"));
+                Arc::new(Store::open_in_memory().expect("in-memory store"))
+            }
+        }
+    };
+    // HOST state: serve until the listener returns.
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        log(&format!("host: serving {listen:?}"));
+        match serve(&listen, local_store(), Arc::clone(&stop), http, token.clone()) {
+            Ok(()) => return, // clean shutdown
+            Err(error) => {
+                if !port_busy(&error) {
+                    log(&format!("host stopped: {error}"));
+                    return;
+                }
+                // Port busy: downgrade to guest against the local port and
+                // keep retrying the bind — upgrade when the port frees.
+                log(&format!(
+                    "host: port busy → degraded to guest (local {listen:?}); retrying bind every 5s"
+                ));
+                let guest = guest_store(&listen, http, &token);
+                proxy.switch(guest);
+                loop {
+                    if stop.load(Ordering::Acquire) {
+                        proxy.switch(local_store());
+                        return;
+                    }
+                    std::thread::sleep(RETRY_TICK);
+                    if stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    // Try to win the bind back. serve() binds internally; a
+                    // dedicated probe keeps the state machine simple.
+                    if try_bind(&listen) {
+                        log(&format!("host: port freed — upgrading to HOST"));
+                        proxy.switch(local_store());
+                        break; // back to the serving loop
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Does `error` mean "the port is held by someone else"?
+fn port_busy(error: &rpi_mesh_core::MeshError) -> bool {
+    let text = error.to_string();
+    text.contains("already listening")
+        || text.contains("Address already in use")
+        || text.contains("in use")
+}
+
+/// Non-destructive bind probe: succeeds only if we can claim the port.
+fn try_bind(listen: &Endpoint) -> bool {
+    match listen {
+        Endpoint::Tcp(host, port) => {
+            std::net::TcpListener::bind((host.as_str(), *port)).is_ok()
+        }
+        Endpoint::Unix(path) => !path.exists() || !std::path::Path::new(path).exists(),
+    }
+}
+
+/// A guest MeshStore pointing at `endpoint` (http mode per config).
+fn guest_store(endpoint: &Endpoint, http: bool, token: &Token) -> Arc<dyn MeshStore> {
+    Arc::new(RemoteStore::with_http(endpoint.clone(), token.clone(), http)) as Arc<dyn MeshStore>
+}
+
+fn listen_endpoint(relay_cfg: &RelayConfig) -> Result<Endpoint, String> {
+    match relay_cfg.listen.as_deref() {
+        Some(text) => Endpoint::parse(text).map_err(|e| e.to_string()),
+        None => Ok(Endpoint::Tcp("127.0.0.1".into(), 9527)),
+    }
+}
+
+fn connect_endpoint(relay_cfg: &RelayConfig) -> Result<Endpoint, String> {
+    relay_cfg
+        .connect
+        .as_deref()
+        .map(Endpoint::parse)
+        .ok_or_else(|| "remote.relay.connect is required for the guest role".to_string())?
+        .map_err(|e| e.to_string())
 }
 
 /// Token file location: explicit `tokenFile`, else `<mesh dir>/relay-token`.

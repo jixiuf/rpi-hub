@@ -338,7 +338,7 @@ fn run_switch(params: &str) -> Result<String, String> {
         .filter(|v| !v.is_empty())
         .unwrap_or("wechat");
     let admin = rpi_mesh_core::lease::LeaseAdmin::new(
-        Arc::clone(&mesh.store),
+        mesh.store_dyn(),
         mesh.config.lease.ttl_ms(),
     );
     let generation = admin.assign_to(capability, &target, now_ms())?;

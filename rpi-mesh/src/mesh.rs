@@ -86,10 +86,12 @@ impl Shutdown {
 pub struct Mesh {
     pub dir: PathBuf,
     pub config: MeshConfig,
-    pub store: Arc<dyn MeshStore>,
+    /// The switchable store proxy: mode switches reroute the inner
+    /// implementation without touching this Arc (see Backends).
+    pub store: Arc<rpi_mesh_core::store::SwitchableStore>,
     /// Read-only lease surface (rpi_mesh_core::lease). The mesh never claims.
     pub lease_observer: rpi_mesh_core::lease::LeaseObserver,
-    backend: Mutex<Option<crate::backends::Backends>>,
+    pub(crate) backend: Mutex<Option<crate::backends::Backends>>,
     pub host: String,
     pub node_id: String,
     pub epoch: String,
@@ -157,8 +159,8 @@ impl Mesh {
 
         let backends =
             crate::backends::Backends::start(&dir, &config).map_err(|e| e.to_string())?;
-        let store = Arc::clone(&backends.store);
-        let lease_observer = rpi_mesh_core::lease::LeaseObserver::new(Arc::clone(&store));
+        let store = Arc::clone(&backends.proxy);
+        let lease_observer = rpi_mesh_core::lease::LeaseObserver::new(Arc::clone(&store) as Arc<dyn MeshStore>);
         let host = detect_host();
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let pid = std::process::id();
@@ -380,6 +382,11 @@ impl Mesh {
         );
     }
 
+    /// The store as a trait object, for callers that need `Arc<dyn MeshStore>`.
+    pub fn store_dyn(&self) -> Arc<dyn MeshStore> {
+        Arc::clone(&self.store) as Arc<dyn MeshStore>
+    }
+
     pub fn record_error(&self, message: impl Into<String>) {
         let message = message.into();
         log(&format!("error: {message}"));
@@ -495,7 +502,7 @@ impl Mesh {
             // on the lease-change signal.
         }
         let admin = rpi_mesh_core::lease::LeaseAdmin::new(
-            Arc::clone(&self.store),
+            Arc::clone(&self.store) as Arc<dyn MeshStore>,
             self.config.lease.ttl_ms(),
         );
         let generation = admin.assign_to("wechat", target, now_ms())?;
@@ -561,10 +568,7 @@ impl Mesh {
         let viewer = rpi_mesh_core::render::RenderContext {
             viewer_node_id: &self.node_id,
             wechat_holder_node: holder_node.as_deref(),
-            remote: !matches!(
-                self.config.remote.mode,
-                rpi_mesh_core::config::RemoteMode::Local
-            ),
+            remote: self.config.remote.role.is_some(),
         };
         let holder_triple = holder.map(|h| (h.owner_name, h.generation, h.expires_at));
         Ok(rpi_mesh_core::render::render_instances_text(

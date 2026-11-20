@@ -131,7 +131,7 @@ impl Channel {
     /// from the mesh — one node_id, one epoch, one presence row per process.
     pub fn new(mesh: Arc<crate::mesh::Mesh>) -> Arc<Self> {
         let lease_owner = rpi_mesh_core::lease::LeaseOwner::new(
-            Arc::clone(&mesh.store) as Arc<dyn rpi_mesh_core::api::MeshStore>,
+            mesh.store_dyn(),
             mesh.node_id.clone(),
             mesh.name(),
             mesh.config.lease.ttl_ms(),

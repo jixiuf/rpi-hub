@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use rpi_plugin_sdk::{CommandHandlerFn, EventHandlerFn, EventTag, StbString, StbStringRef};
 
+use rpi_mesh_core::api::MeshStore;
 use rpi_mesh_core::now_ms;
 
 use crate::wechat::bridge::{self, BridgeContext};
