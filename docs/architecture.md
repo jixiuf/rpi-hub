@@ -191,7 +191,8 @@ ssh。worker 300ms 轮询自己的信箱并 ack，`reply` 按 correlation 回到
 
 ## 9. 已验证的真实拓扑
 
-`RELAY_PORT=8085 scripts/smoke-relay.sh apmprod`：apmprod（Linux）用 tmux 起 relay 实例
-（`http:true`，端口 8085 经公司防火墙可达），本机以 client 直连；断言跨机 presence、
-`/use` 把微信租约切到远端、relay 数据库里 owner 一致。单机回归 `scripts/smoke.sh`
-覆盖两实例、重名、唯一租约、/use 交接（端到端全绿）。
+apmprod（Linux，经公司防火墙可达）：`/mesh relay 8085` 交互式组网为 host，本机
+`/mesh client apmprod-IP:8085 <token>` 以 guest 直连。实测：跨机 presence、
+`/msg` `/ask`（回复经 relay 回传）、`/use` 交接微信（凭据自动同步到目标实例）、
+监听权漂移（杀当前 host，同机另一实例 5s 内接管）、信封与凭据的加密落盘。
+单机回归 `scripts/smoke.sh` 覆盖两实例、重名、唯一租约、/use 交接、双向信箱。

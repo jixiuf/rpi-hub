@@ -75,7 +75,7 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 /ask <实例> <任务>          委派任务（结果以通知形式回到本会话）
 /start [目录]               本机 tmux 启动新实例（缺省=当前实例目录；允许同目录多实例）
 /stop <实例|编号>           停止本机实例的 tmux（租约自动交还）
-/mesh status|who|name <名>|leave
+/mesh relay|client|local|token|status（跨机组网与管理）
 /wechat login|start|stop|status
 ```
 
@@ -110,25 +110,22 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 /mesh client <relay的IP>:<端口> <token>   # token 就是从 relay 输出里复制的那个
 ```
 
-`/mesh status` 显示当前角色（host/guest/local）、监听/连接地址、token 指纹（前 8 位，
+`/mesh status` 显示当前角色（host/guest/单机）、监听/连接地址、token 指纹（前 8 位，
 两端比对用）。`/mesh local` 回单机。角色持久化，重启自动恢复。
 
-**relay 机器建议跑一个专职常驻实例**（tmux while 保活）——监听权在该机实例间自动漂移，
-专职实例保证 relay 不随 TUI 退出而消失。
-
-`/mesh status` 查看当前模式；`/mesh local` 回单机模式。角色持久化在 config.json，
-重启后自动恢复。两台机器不互通没关系——只要各自能连 relay 即可。
+**relay 机器建议跑一个专职常驻实例**（tmux while 保活）——监听权在该机实例间自动漂移：
+常驻实例退出，同机其它实例 5s 内接管监听。两台机器不互通没关系——只要各自能连 relay。
 
 ## 状态与配置
 
 ```
 ~/.rpi/agent/mesh/
 ├── config.json
-├── mesh.db              # SQLite（WAL），多进程共享；schema v2（leases.state_json）
+├── mesh.db              # SQLite（WAL），多进程共享；schema v4
 ├── relay-token
+├── secret.key           # 静态加密密钥（0600）——见下「敏感数据加密」
 ├── logs/mesh.log logs/wechat.log
 └── wechat/              # 微信凭据（0600）与媒体暂存
-└── secret.key           # 静态加密密钥（0600）——见下「敏感数据加密」
 ```
 
 ### 敏感数据加密
@@ -136,15 +133,16 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 mesh.db 里的两类敏感数据在落盘前用 **AES-256-GCM** 加密：微信 bot token 与全部
 信封正文（/msg /ask 的内容）。路由列（to_node/kind）保持明文，relay 无需解密即可转发。
 
-密钥在 DB 之外：`RPI_MESH_SECRET` env（64 位 hex）优先，否则 `<mesh 目录>/secret.key`
-（首次自动生成，0600）。**共享同一 mesh.db（或同一 relay）的所有机器必须持有同一把
-密钥**——onboarding 时复制一次 `secret.key`。丢失它：凭据需重新扫码，信封为瞬态数据。
+密钥存在 DB 之外：优先读环境变量 `RPI_MESH_SECRET`（64 位 hex），否则用
+`<mesh 目录>/secret.key`（首次启动自动生成，权限 0600）。连同一个 mesh.db 的
+所有机器必须用同一把密钥——部署新机器时把 relay 的 `secret.key` 复制过去。
+密钥丢了，加密的数据就解不开了：微信凭据要重新扫码登录，信封数据等它自然过期。
 
 ### 微信凭据自动同步
 
 登录过微信的实例把凭据发布到 mesh.db（加密存储）；其它实例启动时自动拉取落盘，
-**无需在该机重新扫码**。`/use` 交接前会校验目标实例是否有凭据（presence 的 channels
-能力表），没有则拒绝——杜绝「租约在、消息没人拉」的假活状态。
+不用重新扫码。`/use` 交接前会检查目标实例有没有凭据（presence 行的 channels 字段），
+没有就拒绝——避免把微信交给一个收不到消息的实例。
 
 ```json
 {
@@ -159,7 +157,6 @@ mesh.db 里的两类敏感数据在落盘前用 **AES-256-GCM** 加密：微信 
 ```
 
 `lease.ttlSeconds` 必须 ≥ 45（要覆盖微信桥 40s 的 getupdates 长轮询）；`renewSeconds` ≤ ttl/4。
-旧配置里的 `resumeGraceSeconds` / `autoClaim` 已废弃（serde 忽略未知键）。
 
 环境变量：`RPI_MESH_DIR`（状态目录）、`RPI_MESH_INSTANCE`（实例名）、`RPI_MESH_DEBUG=1`、`RPI_MESH_HOST`（主机名覆盖）。
 
