@@ -15,7 +15,11 @@ use rpi_mesh_core::store::Claim;
 use rpi_plugin_sdk::{RuntimeActionFn, RuntimeActionId};
 
 /// Alive window for presence rows (mirrors rpi-mesh).
-pub const ALIVE_MS: i64 = 30_000;
+/// Presence visibility window. Heartbeat is 3s; three missed beats means
+/// the instance is gone. This governs BOTH the listing filter and the
+/// prune/reap window — a cross-machine instance that exits disappears from
+/// /instances within ~10s (pid-reaping cannot help across hosts).
+pub const ALIVE_MS: i64 = 10_000;
 
 static CURRENT: OnceLock<Mutex<Option<Arc<Channel>>>> = OnceLock::new();
 

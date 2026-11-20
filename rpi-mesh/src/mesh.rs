@@ -24,7 +24,11 @@ use rpi_plugin_sdk::callbacks::OwnedString;
 use rpi_plugin_sdk::{PluginApi, RuntimeActionFn, RuntimeActionId, StbString, StbStringRef};
 
 /// How long an instance is considered alive without a heartbeat.
-pub const ALIVE_MS: i64 = 30_000;
+/// Presence visibility window. Heartbeat is 3s; three missed beats means
+/// the instance is gone. This governs BOTH the listing filter and the
+/// prune/reap window — a cross-machine instance that exits disappears from
+/// /instances within ~10s (pid-reaping cannot help across hosts).
+pub const ALIVE_MS: i64 = 10_000;
 
 #[derive(Debug, Clone)]
 pub struct ReplyOutcome {
