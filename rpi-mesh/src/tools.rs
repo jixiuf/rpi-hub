@@ -18,7 +18,7 @@ use rpi_plugin_sdk::{
     PluginApi, StableToolSchema, StepHandle, StepResult, StbString, ToolPartialCb,
 };
 
-use crate::commands::{forward_start, forward_stop, spawn_ctx_from};
+use crate::commands::spawn_ctx_from;
 use crate::mesh::{self, Mesh, ALIVE_MS};
 
 const DEFAULT_ASK_TIMEOUT_S: u64 = 300;

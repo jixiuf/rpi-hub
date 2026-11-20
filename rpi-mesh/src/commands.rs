@@ -223,9 +223,7 @@ extern "C" fn cmd_stop(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
         return 0;
     }
     let result = mesh().and_then(|mesh| {
-        // Cross-machine syntax: "/stop <executor>:<target>" — the executor
-        // instance identifies the machine that runs its local /stop against
-        // the target.
+        // "/stop <executor>:<target>" — explicit executor form.
         if let Some((executor_query, target_query)) = query.split_once(':') {
             let executor_query = executor_query.trim();
             let target_query = target_query.trim();
@@ -245,6 +243,25 @@ extern "C" fn cmd_stop(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
                     rpi_mesh_core::now_ms(),
                 );
             }
+        }
+        // Plain "/stop <target>": resolve the target first. Same machine →
+        // local stop. Remote machine → AUTO-FORWARD to a live instance on
+        // that machine (the user should not need to know which local
+        // instance to pick as executor).
+        let instances = mesh.instances(now_ms())?;
+        let target = resolve_target_by_list(&instances, query, mesh.node_id.as_str())?;
+        if target.host != mesh.host {
+            let executor = instances
+                .iter()
+                .find(|i| i.host == target.host && i.node_id != target.node_id)
+                .ok_or_else(|| {
+                    format!(
+                        "{} 所在机器（{}）没有其它存活实例可以执行停止——直接登录那台机器操作",
+                        target.label(),
+                        target.host
+                    )
+                })?;
+            return forward_stop(&mesh, executor, &target.label());
         }
         let spawn_ctx = spawn_ctx_from(&mesh);
         rpi_mesh_core::instance_start::stop(&spawn_ctx, query, rpi_mesh_core::now_ms())
@@ -343,6 +360,53 @@ fn switch_backends(mesh: &Arc<Mesh>, config: &rpi_mesh_core::config::MeshConfig)
             }
         }
     }
+}
+
+/// Resolve a target from a given instance list (name / label / unique prefix /
+/// row number). Used by the auto-forward path in cmd_stop.
+fn resolve_target_by_list(
+    instances: &[rpi_mesh_core::store::InstanceView],
+    query: &str,
+    _self_node: &str,
+) -> Result<rpi_mesh_core::store::InstanceView, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("target is empty".into());
+    }
+    if let Ok(number) = query.parse::<usize>() {
+        if number == 0 {
+            return Err("编号从 1 开始".into());
+        }
+        return instances
+            .get(number - 1)
+            .cloned()
+            .ok_or_else(|| format!("没有编号为 {number} 的实例"));
+    }
+    let matches: Vec<&rpi_mesh_core::store::InstanceView> = instances
+        .iter()
+        .filter(|i| {
+            i.label() == query
+                || i.name == query
+                || i.node_id.starts_with(query)
+                || i.name.starts_with(query)
+        })
+        .collect();
+    match matches.len() {
+        1 => Ok(matches[0].clone()),
+        0 => Err(format!(
+            "no instance matches {query:?}; running: {}",
+            instances
+                .iter()
+                .map(|i| i.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        n => Err(format!(
+            "{query:?} matches {n} instances; use the full name@host"
+        )),
+    }
+    .map_err(|e| e.to_string())
+    .and_then(|v| Ok(v))
 }
 
 /// Best-effort outward-facing IPv4 (first address of `hostname -I`).
