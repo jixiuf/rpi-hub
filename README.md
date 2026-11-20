@@ -66,6 +66,7 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 | `mesh_start` | 启动新实例（缺省本机；指定另一实例名则在它所在的机器上启动） |
 | `mesh_stop` | 停止实例（本机或远端自动路由） |
 | `mesh_cmd` | 在另一实例上执行管理指令（status/model/thinking/name/stop/reload） |
+|  | 对应斜杠命令：`/cmd <实例> <指令>`，TUI 与手机端均可 |
 | `send_image_to_wechat` / `send_file_to_wechat` | 微信媒体外发（iLink CDN 加密上传） |
 
 ## 斜杠命令

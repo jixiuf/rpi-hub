@@ -71,7 +71,7 @@ rpi_plugin_sdk::export_plugin!(|api| {
     }
 
     if let Some(register_suggester) = api.register_argument_suggester {
-        for command in ["msg", "ask", "use", "stop", "start"] {
+        for command in ["msg", "ask", "use", "stop", "start", "cmd"] {
             let rc = register_suggester(
                 StbStringRef::from_str(command),
                 suggest::suggest_arguments,

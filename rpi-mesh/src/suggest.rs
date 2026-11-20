@@ -67,7 +67,20 @@ fn build_suggestions(request: &str) -> Option<serde_json::Value> {
     // target is typed. The host's narrowing is prefix-ranked, so these
     // composite rows win (rank 0) while the bare instance rows still match
     // by contains (rank 2) — both visible, the intent rows first.
-    let items = if command == "start" {
+    let items = if command == "cmd" {
+        // /cmd 两段式：先补实例，输入实例名后补远程安全的 intent 列表。
+        let mut items = cached_rows(&mesh)?;
+        let target_part = args.split_once(char::is_whitespace).map(|(t, _)| t);
+        if let Some(target) = target_part.filter(|t| !t.trim().is_empty()) {
+            for (name, desc) in CMD_INTENTS {
+                items.push(serde_json::json!({
+                    "value": format!("{target} {name}"),
+                    "label": format!("/{name} — {desc}"),
+                }));
+            }
+        }
+        cap_rows(items)
+    } else if command == "start" {
         // /start 的参数：本机=目录（无法枚举）；跨机=执行实例。统一给出实例列表，
         // 用户选一个就得到 "实例:" 前缀（跨机），手打目录则跳过补全。
         cached_rows(&mesh)?
@@ -115,6 +128,19 @@ const INTENTS: &[(&str, &str)] = &[
     ("model", "切换模型"),
     ("thinking", "设置 thinking 级别"),
     ("name", "设置会话名"),
+    ("stop", "停止当前生成"),
+    ("reload", "重载本实例扩展"),
+    ("spawn", "在本机启动新实例"),
+    ("terminate", "停掉本机上的指定实例"),
+];
+
+/// /cmd 的远程安全 intent（与 commands.rs REMOTE_SAFE_INTENTS 同步）：
+/// 会话类（new/fork/switch/compact）不能跨机执行。
+const CMD_INTENTS: &[(&str, &str)] = &[
+    ("status", "实例与会话状态"),
+    ("model <id>", "切换模型"),
+    ("thinking <level>", "设置 thinking 级别"),
+    ("name <文本>", "设置会话名"),
     ("stop", "停止当前生成"),
     ("reload", "重载本实例扩展"),
 ];

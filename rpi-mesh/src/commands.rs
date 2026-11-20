@@ -611,7 +611,7 @@ extern "C" fn cmd_cmd(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
         let (target_query, rest) = split_target(&args);
         if target_query.is_empty() || rest.trim().is_empty() {
             return Ok(Reply::Text(
-                "用法: /cmd <实例> <指令> [参数]\n指令: status | model <id> | thinking <level> | name <文本> | stop | reload\n（new/fork/switch 等会话类指令请在目标实例的 TUI 上执行）".to_string(),
+                "用法: /cmd <实例> <指令> [参数]\n指令: status | model [id] | thinking <级别> | name <文本> | stop | reload\n（new/fork/switch/compact 等会话类指令请在目标实例的 TUI 上执行）".to_string(),
             ));
         }
         let intent_text = rest.trim();
