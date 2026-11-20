@@ -272,11 +272,15 @@ fn assign_hands_a_lease_to_a_target_and_fences_the_old_owner() {
     store
         .claim_lease("wechat", "n1", "home", now, TTL)
         .unwrap();
+    // The cursor (channel state) stays with the lease across the hand-off.
+    store.set_lease_cursor("wechat", "cursor-42");
     let generation = store
         .assign_lease("wechat", "n2", "models", now + 1, TTL)
         .unwrap();
     assert_eq!(generation, 2);
     assert!(!store.check_lease("wechat", "n1", 1, now + 2).unwrap());
+    // The new owner continues where the old one stopped — no replay.
+    assert_eq!(store.lease_cursor("wechat").as_deref(), Some("cursor-42"));
 
     // The target claims (same node): the generation holds.
     let claim = store

@@ -896,6 +896,10 @@ impl Store {
             )
             .optional()?;
         let generation = existing.map(|generation| generation + 1).unwrap_or(1);
+        // The channel state (cursor) STAYS with the lease row: it moves with
+        // ownership, so the new owner continues exactly where the old one
+        // stopped — no replay of already-processed messages. (Forgetting to
+        // preserve it caused the duplicate-processing bug after every /use.)
         tx.execute(
             r#"INSERT INTO leases(capability, owner_node, owner_name, generation, expires_at, updated_at, state_json)
                VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}')
@@ -904,8 +908,7 @@ impl Store {
                  owner_name = excluded.owner_name,
                  generation = excluded.generation,
                  expires_at = excluded.expires_at,
-                 updated_at = excluded.updated_at,
-                 state_json = excluded.state_json"#,
+                 updated_at = excluded.updated_at"#,
             params![capability, to_node, to_name, generation, now + ttl_ms, now],
         )?;
         tx.commit()?;
