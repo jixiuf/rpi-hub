@@ -358,11 +358,7 @@ pub async fn run(mesh: Arc<Channel>, ctx: BridgeContext) -> StopReason {
     // Shared cursor from the DB: a hand-off mid-poll never replays or splits
     // messages, because whoever polls next continues from the advanced cursor.
     let mut cursor = {
-        let state = mesh.store().channel_state("wechat");
-        let from_state = state
-            .as_ref()
-            .and_then(|s| s.get("cursor").and_then(|c| c.as_str()))
-            .map(str::to_string);
+        let from_state = mesh.store().lease_cursor("wechat");
         from_state
             .or((!ctx.cursor.is_empty()).then(|| ctx.cursor.clone()))
             .unwrap_or_default()
@@ -411,9 +407,7 @@ pub async fn run(mesh: Arc<Channel>, ctx: BridgeContext) -> StopReason {
             Ok(page) => {
                 cursor = page.cursor;
                 {
-                    let mut state = mesh.store().channel_state("wechat").unwrap_or_default();
-                    state["cursor"] = serde_json::json!(cursor);
-                    mesh.store().set_channel_state("wechat", &state);
+                    mesh.store().set_lease_cursor("wechat", &cursor);
                 }
                 crate::wechat::state::save_cursor(&mesh.dir(), &cursor);
                 for raw in &page.msgs {

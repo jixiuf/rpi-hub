@@ -118,6 +118,12 @@ pub trait MeshStore: Send + Sync + std::fmt::Debug {
         None
     }
     fn set_channel_state(&self, _capability: &str, _state: &serde_json::Value) {}
+    /// Per-lease runtime state (cursor) — lives on the lease row, moves
+    /// atomically with ownership.
+    fn lease_cursor(&self, _capability: &str) -> Option<String> {
+        None
+    }
+    fn set_lease_cursor(&self, _capability: &str, _cursor: &str) {}
     /// Drop presence rows of same-host pids that are demonstrably dead
     /// (`kill(pid, 0)` fails). Only the local Store reaps; remote clients
     /// keep the no-op default (a foreign machine's pids are meaningless

@@ -562,13 +562,18 @@ fn v1_database_migrates_to_v2_and_carries_channel_state() {
     let store = Store::open(&path).unwrap();
     let holder = store.lease_holder("wechat").unwrap().unwrap();
     assert_eq!(holder.generation, 3);
-    // The v1 row migrated with the DEFAULT '{}' — an empty state object.
-    let migrated = store.channel_state("wechat").unwrap();
-    assert!(migrated.as_object().unwrap().is_empty());
+    // The v1 row migrated with the DEFAULT '{}' — lease_cursor is None until
+    // the owner sets one (the state is encrypted at rest now).
+    assert_eq!(store.lease_cursor("wechat"), None);
+    store.set_lease_cursor("wechat", "c-42");
+    assert_eq!(store.lease_cursor("wechat").as_deref(), Some("c-42"));
 
-    store
-        .set_channel_state("wechat", &serde_json::json!({ "cursor": "c-42" }))
-        ;
-    let state = store.channel_state("wechat").unwrap();
-    assert_eq!(state["cursor"], "c-42");
+    // Shared channel facts (credentials) live in their own table, encrypted.
+    assert_eq!(store.channel_state("wechat:credentials"), None);
+    store.set_channel_state(
+        "wechat:credentials",
+        &serde_json::json!({ "credentials": { "userId": "u1" } }),
+    );
+    let published = store.channel_state("wechat:credentials").unwrap();
+    assert_eq!(published["credentials"]["userId"], "u1");
 }

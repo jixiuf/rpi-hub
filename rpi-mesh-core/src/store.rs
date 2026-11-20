@@ -79,9 +79,14 @@ CREATE TABLE IF NOT EXISTS seen (
     ts INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS seen_ts ON seen(ts);
+
+CREATE TABLE IF NOT EXISTS channel_state (
+    capability TEXT PRIMARY KEY,
+    state_json TEXT NOT NULL
+);
 "#;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// How the store is opened: a file (normal) or memory (tests).
 pub struct Store {
@@ -911,7 +916,10 @@ impl Store {
     /// the cursor moves atomically with ownership, so a hand-off can never
     /// leave "new owner, old cursor" behind. Replaces the kv-based cursor
     /// (kept below read-only for one release's migration).
-    pub fn channel_state(&self, capability: &str) -> Option<serde_json::Value> {
+    /// Per-lease runtime state (the wechat cursor): lives on the lease row
+    /// so it moves atomically with ownership during a hand-off. Distinct
+    /// from `channel_state` (shared facts like credentials).
+    pub fn lease_cursor(&self, capability: &str) -> Option<String> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let text: String = conn
             .query_row(
@@ -922,7 +930,41 @@ impl Store {
             .optional()
             .ok()
             .flatten()?;
-        // Empty = never set. Encrypted at rest (credentials are stored here).
+        let decrypted = crate::secret::decrypt(&text).ok()?;
+        serde_json::from_str::<serde_json::Value>(&decrypted)
+            .ok()?
+            .get("cursor")
+            .and_then(|c| c.as_str())
+            .map(str::to_string)
+    }
+
+    pub fn set_lease_cursor(&self, capability: &str, cursor: &str) {
+        let state = serde_json::json!({ "cursor": cursor });
+        let Ok(text) = serde_json::to_string(&state) else {
+            return;
+        };
+        let text = crate::secret::encrypt(&text);
+        if let Ok(conn) = self.conn.lock() {
+            let _ = conn.execute(
+                "UPDATE leases SET state_json = ?2 WHERE capability = ?1",
+                params![capability, text],
+            );
+        }
+    }
+
+    /// Shared channel FACTS (e.g. published wechat credentials) — independent
+    /// of any lease row. Encrypted at rest (credentials carry the bot token).
+    pub fn channel_state(&self, capability: &str) -> Option<serde_json::Value> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let text: String = conn
+            .query_row(
+                "SELECT state_json FROM channel_state WHERE capability = ?1",
+                params![capability],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()?;
         let text = crate::secret::decrypt(&text).ok()?;
         serde_json::from_str(&text).ok()
     }
@@ -931,11 +973,11 @@ impl Store {
         let Ok(text) = serde_json::to_string(state) else {
             return;
         };
-        // Encrypted at rest: wechat credentials are stored here.
         let text = crate::secret::encrypt(&text);
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
-                "UPDATE leases SET state_json = ?2 WHERE capability = ?1",
+                "INSERT INTO channel_state(capability, state_json) VALUES (?1, ?2)
+                 ON CONFLICT(capability) DO UPDATE SET state_json = excluded.state_json",
                 params![capability, text],
             );
         }
