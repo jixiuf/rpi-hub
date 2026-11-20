@@ -32,7 +32,7 @@ pub fn registry() -> Vec<(&'static str, &'static str, CommandHandlerFn)> {
             cmd_mesh,
         ),
         ("start", "启动新实例：/start [目录]（本机）/ /start <实例>:<目录>（跨机）", cmd_start),
-        ("stop", "停止本机实例：/stop <编号|名字>", cmd_stop),
+        ("stop", "停止实例：/stop <编号|名字>（本机）/ /stop <执行实例>:<目标>（跨机）", cmd_stop),
     ]
 }
 
@@ -219,7 +219,7 @@ extern "C" fn cmd_stop(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void)
     let args = args_of(raw);
     let query = args.trim();
     if query.is_empty() {
-        emit_error(out, "用法: /stop <编号|名字>（见 /instances）或 /stop <实例>:<实例> 跨机停止");
+        emit_error(out, "用法: /stop <编号|名字>（见 /instances）或 /stop <执行实例>:<目标实例> 跨机停止");
         return 0;
     }
     let result = mesh().and_then(|mesh| {

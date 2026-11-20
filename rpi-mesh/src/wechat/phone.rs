@@ -308,6 +308,7 @@ const HELP: &str = "微信命令（直接发送，不经过 AI）:\n\
   /help       本帮助\n\
   /start [目录]  本机启动新实例（缺省=本实例目录）\n\
   /stop <编号|名字>  停止本机实例\n\
+  （跨机启动/停止在 TUI：/start <实例>:<目录>）\n\
 其它文本原样发给当前实例的 AI。";
 
 /// Assemble the core SpawnContext for the wechat plugin. `cwd_override`
