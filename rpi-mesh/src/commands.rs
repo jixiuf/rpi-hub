@@ -10,7 +10,8 @@ use rpi_plugin_sdk::RuntimeActionId;
 use std::path::Path;
 use std::process::Command;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use rpi_mesh_core::now_ms;
 use rpi_mesh_core::api::MeshStore;
@@ -639,9 +640,34 @@ extern "C" fn cmd_cmd(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) 
     finish(out, result)
 }
 
+/// Earliest instant the next /reloadall may fire (guards against double
+/// execution landing inside our own reload window — the second call finds
+/// the plugin mid-reload and reports "rpi-mesh 未初始化").
+static NEXT_RELOADALL: OnceLock<Mutex<std::time::Instant>> = OnceLock::new();
+const RELOADALL_DEBOUNCE: Duration = Duration::from_secs(15);
+
 extern "C" fn cmd_reloadall(raw: StbStringRef, out: *mut StbString, _ud: *mut c_void) -> i32 {
     let _ = raw;
     let result = (|| -> Result<Reply, String> {
+        let gate = NEXT_RELOADALL.get_or_init(|| Mutex::new(std::time::Instant::now() - RELOADALL_DEBOUNCE));
+        let wait = {
+            let next = gate.lock().expect("reloadall gate");
+            let elapsed = next.elapsed();
+            if elapsed < RELOADALL_DEBOUNCE {
+                Some(RELOADALL_DEBOUNCE - elapsed)
+            } else {
+                None
+            }
+        };
+        if let Some(wait) = wait {
+            return Ok(Reply::Text(format!(
+                "刚执行过 /reloadall（约 {}s 前），插件可能正在重载——请再等 {}s 后重试",
+                RELOADALL_DEBOUNCE.as_secs() - wait.as_secs(),
+                wait.as_secs().max(1)
+            )));
+        }
+        *gate.lock().expect("reloadall gate") = std::time::Instant::now();
+
         let mesh = mesh()?;
         let now = now_ms();
         let instances = mesh.instances(now)?;
