@@ -88,7 +88,44 @@ cp target/release/librpi_mesh.dylib ~/.rpi/agent/extensions/
 /wechat login|start|stop|status
 ```
 
-`/msg` `/ask` `/use` `/stop` 都注册了参数建议（宿主 `register_argument_suggester`）。
+`/msg` `/ask` `/use` `/stop` `/start` `/cmd` 都注册了参数建议（宿主 `register_argument_suggester`）。
+
+## 典型用法
+
+两台机器：本机 `office`（办公室）、远端 `home@server`（机房，专职常驻实例）。
+
+```bash
+# 组网：server 上执行
+/mesh relay 8085
+# office 上执行（token 从 server 的 /mesh relay 输出里拿）
+/mesh client <server-ip>:8085 <token>
+
+# 查看全网实例（server 上的实例出现在列表里）
+/instances
+
+# 把微信交给 server 的实例（手机上从此直接和 home@server 对话）
+/use home@server
+
+# 委派调研：任务在 server 的环境里跑（内网、数据都在那边）
+/ask home@server 查一下线上 orders 服务的最新发布记录
+
+# 改远端实例的模型 / 会话名 / 停止它正在跑的生成
+/cmd home@server model sonnet
+/cmd home@server name orders-调研
+/cmd home@server stop
+
+# 在 server 上起一个新项目实例（目录在 server 上）
+/start home@server:/home/admin/repos/api-server
+
+# 停掉它（无论谁执行，目标所在机器自动路由）
+/stop home@server:api-server
+
+# 临时回本机处理微信
+/use office
+```
+
+手机端同样支持：`/instances` 查看编号、`/use <编号>` 切换、`/start /stop` 本机操作、
+普通文本直接对话——微信消息始终由当前持有者处理。
 
 ## 微信手机命令
 
